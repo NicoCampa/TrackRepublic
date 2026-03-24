@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { useMemo } from "react";
 import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
-import { DatabaseZap, LayoutDashboard, List, MessageSquareText, Settings2, Wallet } from "lucide-react";
+import { DatabaseZap, LayoutDashboard, List, MessageSquareText, Wallet } from "lucide-react";
 import { BrandLogo } from "./brand-logo";
 
 const PRIMARY_LINKS = [
@@ -40,7 +40,7 @@ const UTILITY_GROUPS: UtilityGroup[] = [
       {
         href: "/transactions",
         label: "Transactions",
-        description: "Ledger, search, and fixes",
+        description: "Ledger, review queue, and fixes",
         icon: List,
         activeMatch: "/transactions",
       },
@@ -49,13 +49,6 @@ const UTILITY_GROUPS: UtilityGroup[] = [
   {
     title: "Tools",
     links: [
-      {
-        href: "/operations",
-        label: "Review",
-        description: "Fix uncertain rows and overrides",
-        icon: Settings2,
-        activeMatch: "/operations",
-      },
       {
         href: "/assistant",
         label: "Ask AI",
@@ -91,10 +84,10 @@ export function AppFrame({ children }: { children: ReactNode }) {
       return "/portfolio";
     }
     if (pathname.startsWith("/operations")) {
-      return "/operations";
+      return "/transactions";
     }
     if (pathname.startsWith("/settings")) {
-      return "/operations";
+      return "/transactions";
     }
     if (pathname.startsWith("/load-data")) {
       return "/load-data";

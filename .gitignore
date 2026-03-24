@@ -7,12 +7,15 @@ out/
 .streamlit/
 src-tauri/target/
 src-tauri/gen/
+desktop-runtime/
+src-tauri-placeholder/
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
 config/manual_category_rules.csv
 config/transaction_overrides.csv
+config/manual_transactions.csv
 config/position_unit_overrides.csv
 *.pyc
 __pycache__/

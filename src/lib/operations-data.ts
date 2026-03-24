@@ -1,12 +1,10 @@
 import { existsSync, statSync } from "node:fs";
-import { CATEGORY_CACHE_PATH, PIPELINE_SUMMARY_PATH, loadManualRules, loadPipelineSummarySync, loadRowOverrides, type ManualRuleRecord, type PipelineSummary, type RowOverrideRecord } from "./config-store";
+import { CATEGORY_CACHE_PATH, PIPELINE_SUMMARY_PATH, loadPipelineSummarySync, type PipelineSummary } from "./config-store";
 import { getBaseDashboardSnapshotKey, loadBaseDashboardData } from "./dashboard-data";
 import { readCacheInspection } from "./pipeline-jobs";
 
 export type OperationsData = {
   transactions: Awaited<ReturnType<typeof loadBaseDashboardData>>["transactions"];
-  rules: ManualRuleRecord[];
-  rowOverrides: RowOverrideRecord[];
   pipelineSummary: PipelineSummary | null;
   cache: Awaited<ReturnType<typeof readCacheInspection>>;
 };
@@ -39,17 +37,13 @@ export async function loadOperationsData(): Promise<OperationsData> {
 
   const promise = Promise.resolve()
     .then(async () => {
-      const [dashboardData, rules, rowOverrides, cache] = await Promise.all([
+      const [dashboardData, cache] = await Promise.all([
         loadBaseDashboardData(),
-        loadManualRules(),
-        loadRowOverrides(),
         readCacheInspection(),
       ]);
 
       return {
         transactions: dashboardData.transactions,
-        rules,
-        rowOverrides,
         pipelineSummary: loadPipelineSummarySync(),
         cache,
       };

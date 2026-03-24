@@ -10,6 +10,7 @@ export const RAW_DIR = path.join(ROOT, "data", "raw");
 
 export const MANUAL_RULES_PATH = path.join(CONFIG_DIR, "manual_category_rules.csv");
 export const ROW_OVERRIDES_PATH = path.join(CONFIG_DIR, "transaction_overrides.csv");
+export const MANUAL_TRANSACTIONS_PATH = path.join(CONFIG_DIR, "manual_transactions.csv");
 export const POSITION_OVERRIDES_PATH = path.join(CONFIG_DIR, "position_unit_overrides.csv");
 export const INSTRUMENT_REGISTRY_PATH = path.join(CONFIG_DIR, "instrument_registry.csv");
 export const PIPELINE_SUMMARY_PATH = path.join(DATA_DIR, "pipeline_summary.json");
@@ -43,6 +44,18 @@ export const ROW_OVERRIDE_COLUMNS = [
   "confidence",
   "needs_review",
   "source",
+  "updated_at",
+] as const;
+
+export const MANUAL_TRANSACTION_COLUMNS = [
+  "row_id",
+  "date",
+  "transaction_type",
+  "merchant",
+  "description",
+  "signed_amount",
+  "category",
+  "subcategory",
   "updated_at",
 ] as const;
 
@@ -87,6 +100,18 @@ export type RowOverrideRecord = {
   confidence: number;
   needsReview: boolean;
   source: string;
+  updatedAt: string;
+};
+
+export type ManualTransactionRecord = {
+  rowId: string;
+  date: string;
+  transactionType: string;
+  merchant: string;
+  description: string;
+  signedAmount: number;
+  category: string;
+  subcategory: string;
   updatedAt: string;
 };
 
@@ -334,6 +359,39 @@ function toRowOverrideRow(override: RowOverrideRecord): Record<string, string> {
   };
 }
 
+function normalizeManualTransaction(row: Record<string, string>): ManualTransactionRecord | null {
+  const rowId = (row.row_id ?? "").trim();
+  const date = (row.date ?? "").trim();
+  if (!rowId || !date) {
+    return null;
+  }
+  return {
+    rowId,
+    date,
+    transactionType: (row.transaction_type ?? "").trim(),
+    merchant: (row.merchant ?? "").trim(),
+    description: (row.description ?? "").trim(),
+    signedAmount: parseNumber(row.signed_amount, 0),
+    category: (row.category ?? "").trim() || "other",
+    subcategory: (row.subcategory ?? "").trim() || "manual_entry",
+    updatedAt: (row.updated_at ?? "").trim(),
+  };
+}
+
+function toManualTransactionRow(transaction: ManualTransactionRecord): Record<string, string> {
+  return {
+    row_id: transaction.rowId,
+    date: transaction.date,
+    transaction_type: transaction.transactionType,
+    merchant: transaction.merchant,
+    description: transaction.description,
+    signed_amount: String(transaction.signedAmount),
+    category: transaction.category,
+    subcategory: transaction.subcategory,
+    updated_at: transaction.updatedAt,
+  };
+}
+
 function normalizeInstrumentRegistryEntry(row: Record<string, string>): InstrumentRegistryEntry | null {
   const key = (row.key ?? row.isin ?? row.symbol ?? "").trim();
   if (!key) {
@@ -397,6 +455,33 @@ export async function loadRowOverrides(): Promise<RowOverrideRecord[]> {
 export async function saveRowOverrides(overrides: RowOverrideRecord[]) {
   await ensureCsvFile(ROW_OVERRIDES_PATH, ROW_OVERRIDE_COLUMNS);
   await writeCsv(ROW_OVERRIDES_PATH, ROW_OVERRIDE_COLUMNS, overrides.map(toRowOverrideRow));
+}
+
+export function loadManualTransactionsSync(): ManualTransactionRecord[] {
+  if (!existsSync(MANUAL_TRANSACTIONS_PATH)) {
+    return [];
+  }
+  return readCsvSync(MANUAL_TRANSACTIONS_PATH)
+    .map(normalizeManualTransaction)
+    .filter((row): row is ManualTransactionRecord => Boolean(row));
+}
+
+export async function loadManualTransactions(): Promise<ManualTransactionRecord[]> {
+  if (!existsSync(MANUAL_TRANSACTIONS_PATH)) {
+    return [];
+  }
+  return (await readCsv(MANUAL_TRANSACTIONS_PATH))
+    .map(normalizeManualTransaction)
+    .filter((row): row is ManualTransactionRecord => Boolean(row));
+}
+
+export async function saveManualTransactions(transactions: ManualTransactionRecord[]) {
+  await ensureCsvFile(MANUAL_TRANSACTIONS_PATH, MANUAL_TRANSACTION_COLUMNS);
+  await writeCsv(
+    MANUAL_TRANSACTIONS_PATH,
+    MANUAL_TRANSACTION_COLUMNS,
+    transactions.map(toManualTransactionRow),
+  );
 }
 
 export function loadInstrumentRegistrySync(): Record<string, InstrumentRegistryEntry> {

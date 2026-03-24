@@ -6,12 +6,15 @@ import { FIXED_COST_CATEGORIES, bucketLabel, categoryLabel, deriveCashflowBucket
 import {
   CONFIG_DIR,
   INSTRUMENT_REGISTRY_PATH,
+  MANUAL_TRANSACTIONS_PATH,
   loadInstrumentRegistrySync,
+  loadManualTransactionsSync,
   loadManualRulesSync,
   loadRowOverridesSync,
   MANUAL_RULES_PATH,
   POSITION_OVERRIDES_PATH,
   ROW_OVERRIDES_PATH,
+  type ManualTransactionRecord,
   type InstrumentRegistryEntry,
   type ManualRuleRecord,
   type RowOverrideRecord,
@@ -219,7 +222,7 @@ function buildFileSignature(filePaths: string[]) {
 }
 
 function collectConfigFilePaths() {
-  return [MANUAL_RULES_PATH, ROW_OVERRIDES_PATH, POSITION_OVERRIDES_PATH, INSTRUMENT_REGISTRY_PATH];
+  return [MANUAL_RULES_PATH, ROW_OVERRIDES_PATH, MANUAL_TRANSACTIONS_PATH, POSITION_OVERRIDES_PATH, INSTRUMENT_REGISTRY_PATH];
 }
 
 function collectProcessedFilePaths() {
@@ -292,10 +295,84 @@ function loadTransactions(): TransactionRecord[] {
     }))
     .sort((left, right) => `${left.date}-${left.rowId}`.localeCompare(`${right.date}-${right.rowId}`));
 
-  return applyConfiguredOverrides(transactions);
+  const manualTransactions = loadManualTransactionsSync();
+  return applyConfiguredOverrides(mergeManualTransactions(transactions, manualTransactions));
 }
 
-function loadCashBalances(): CashBalancePoint[] {
+function manualTransactionToRow(transaction: ManualTransactionRecord): TransactionRecord {
+  const group = deriveGroupFromCategory(transaction.category);
+  const bucket = deriveCashflowBucket(group, transaction.category);
+  return {
+    rowId: transaction.rowId,
+    date: transaction.date,
+    monthLabel: transaction.date.slice(0, 7),
+    yearLabel: transaction.date.slice(0, 4),
+    txType: transaction.transactionType || "Manual",
+    merchant: transaction.merchant || "Manual entry",
+    description: transaction.description || transaction.merchant || "Manual entry",
+    group,
+    groupLabel: groupLabel(group),
+    category: transaction.category,
+    categoryLabel: categoryLabel(transaction.category),
+    subcategory: transaction.subcategory || "manual_entry",
+    cashflowBucket: bucket,
+    cashflowBucketLabel: bucketLabel(bucket),
+    signedAmount: transaction.signedAmount,
+    balance: 0,
+    needsReview: false,
+    isRecurring: false,
+    isFixedCost: group === "expense" && FIXED_COST_CATEGORIES.has(transaction.category),
+    confidence: 0.99,
+    classificationSource: "manual_entry",
+    classificationSourceLabel: sourceLabel("manual_entry"),
+  };
+}
+
+function mergeManualTransactions(
+  transactions: TransactionRecord[],
+  manualTransactions: ManualTransactionRecord[],
+): TransactionRecord[] {
+  if (manualTransactions.length === 0) {
+    return transactions;
+  }
+
+  const manualRows = manualTransactions.map(manualTransactionToRow);
+  const merged = [...transactions, ...manualRows].sort((left, right) => {
+    if (left.date !== right.date) {
+      return left.date.localeCompare(right.date);
+    }
+    const leftManual = left.classificationSource === "manual_entry";
+    const rightManual = right.classificationSource === "manual_entry";
+    if (leftManual !== rightManual) {
+      return leftManual ? 1 : -1;
+    }
+    return left.rowId.localeCompare(right.rowId);
+  });
+
+  let manualDelta = 0;
+  let lastAdjustedBalance: number | null = null;
+
+  return merged.map((row) => {
+    if (row.classificationSource === "manual_entry") {
+      const adjustedBalance = (lastAdjustedBalance ?? 0) + row.signedAmount;
+      manualDelta += row.signedAmount;
+      lastAdjustedBalance = adjustedBalance;
+      return {
+        ...row,
+        balance: adjustedBalance,
+      };
+    }
+
+    const adjustedBalance = row.balance + manualDelta;
+    lastAdjustedBalance = adjustedBalance;
+    return {
+      ...row,
+      balance: adjustedBalance,
+    };
+  });
+}
+
+function loadCashBalances(manualTransactions: ManualTransactionRecord[] = []): CashBalancePoint[] {
   const rows = readCsv(CASH_CSV).sort((left, right) => `${left.date}-${left.row_id}`.localeCompare(`${right.date}-${right.row_id}`));
   const byDate = new Map<string, CashBalancePoint>();
 
@@ -311,7 +388,42 @@ function loadCashBalances(): CashBalancePoint[] {
     byDate.set(date, existing);
   }
 
-  return [...byDate.values()].sort((left, right) => left.date.localeCompare(right.date));
+  if (manualTransactions.length === 0) {
+    return [...byDate.values()].sort((left, right) => left.date.localeCompare(right.date));
+  }
+
+  const manualByDate = manualTransactions.reduce<Map<string, number>>((acc, row) => {
+    acc.set(row.date, (acc.get(row.date) ?? 0) + row.signedAmount);
+    return acc;
+  }, new Map());
+  const allDates = [...new Set([...byDate.keys(), ...manualByDate.keys()])].sort();
+  const adjusted: CashBalancePoint[] = [];
+  let currentCash = 0;
+  let cumulativeManualDelta = 0;
+  let seenCash = false;
+
+  for (const date of allDates) {
+    const base = byDate.get(date);
+    if (base) {
+      currentCash = base.cashBalance + cumulativeManualDelta;
+      seenCash = true;
+    }
+    const manualDelta = manualByDate.get(date) ?? 0;
+    if (!base && !seenCash) {
+      currentCash = manualDelta;
+      seenCash = true;
+    } else {
+      currentCash += manualDelta;
+    }
+    cumulativeManualDelta += manualDelta;
+    adjusted.push({
+      date,
+      cashBalance: currentCash,
+      cashChange: (base?.cashChange ?? 0) + manualDelta,
+    });
+  }
+
+  return adjusted;
 }
 
 function loadFundRows(): FundRecord[] {
@@ -415,7 +527,8 @@ function buildCapitalSeries(
 
 async function buildBaseDashboardData(): Promise<BaseDashboardData> {
   const transactions = loadTransactions();
-  const cashBalances = loadCashBalances();
+  const manualTransactions = loadManualTransactionsSync();
+  const cashBalances = loadCashBalances(manualTransactions);
   const fundRows = loadFundRows();
   const capitalSeries = buildCapitalSeries(cashBalances, fundRows, transactions);
   const positionUnitOverrides = loadPositionUnitOverrides();

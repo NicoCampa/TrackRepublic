@@ -13,6 +13,7 @@ import {
   savePipelineSummary,
   type PipelineSummary,
 } from "./config-store";
+import { resolveRuntimeScript } from "./runtime-paths";
 
 export type PipelineMode = "parse_classify" | "reclassify" | "refresh_reclassify";
 
@@ -32,8 +33,8 @@ export type PipelineJob = {
 };
 
 const ROOT = process.cwd();
-const CONVERT_SCRIPT = path.join(ROOT, "scripts", "convert_trade_republic_statement.py");
-const CATEGORIZE_SCRIPT = path.join(ROOT, "scripts", "categorize_transactions.py");
+const CONVERT_SCRIPT = resolveRuntimeScript("convert_trade_republic_statement.py");
+const CATEGORIZE_SCRIPT = resolveRuntimeScript("categorize_transactions.py");
 const PROCESSED_OUTPUTS = [
   "statement_transactions.csv",
   "statement_money_market_fund.csv",

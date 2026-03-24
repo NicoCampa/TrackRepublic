@@ -7,7 +7,7 @@
     "dev": "next dev",
     "dev:desktop": "next dev --hostname 127.0.0.1 --port 3210",
     "build": "next build",
-    "build:desktop": "next build && node scripts/prepare-desktop-bundle.mjs",
+    "build:desktop": "node -e \"require('node:fs').rmSync('desktop-runtime', { recursive: true, force: true }); require('node:fs').rmSync('src-tauri-placeholder', { recursive: true, force: true });\" && next build && node scripts/prepare-desktop-bundle.mjs",
     "start": "next start",
     "desktop": "tauri dev",
     "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml"

@@ -47,6 +47,7 @@ export const BUCKET_LABELS: Record<string, string> = {
 };
 
 export const SOURCE_LABELS: Record<string, string> = {
+  manual_entry: "Manual entry",
   row_override: "Row override",
   manual_rule: "Manual rule",
   rule: "Built-in rule",

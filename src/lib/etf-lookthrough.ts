@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import path from "node:path";
 import type { TransactionRecord } from "./dashboard-data";
 import { extractInvestmentTrades, type InstrumentRegistryLookup } from "./investment-positions";
+import { resolveRuntimeScript } from "./runtime-paths";
 
 export type ExposureSlice = {
   name: string;
@@ -278,7 +278,7 @@ async function fetchPdfText(url: string): Promise<string> {
       {
         loadedAt: Date.now(),
         promise: (async () => {
-          const scriptPath = path.join(process.cwd(), "scripts", "extract_pdf_text.mjs");
+          const scriptPath = resolveRuntimeScript("extract_pdf_text.mjs");
           return execFileSync(process.execPath, [scriptPath, url], {
             encoding: "utf8",
             maxBuffer: 20 * 1024 * 1024,

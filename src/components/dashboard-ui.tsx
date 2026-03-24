@@ -242,14 +242,14 @@ export function PageToolbar({
   children,
   items = [],
 }: {
-  children: ReactNode;
+  children?: ReactNode;
   items?: string[];
 }) {
   const visible = items.filter(Boolean);
 
   return (
     <section className="page-toolbar">
-      <div className="page-toolbar-body">{children}</div>
+      {children ? <div className="page-toolbar-body">{children}</div> : null}
       {visible.length > 0 ? (
         <div className="page-toolbar-pills" aria-label="Current filters">
           {visible.map((item) => (

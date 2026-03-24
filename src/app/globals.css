@@ -1212,6 +1212,12 @@ select {
   padding: 12px 14px 14px;
 }
 
+.manual-transaction-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .metrics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -2691,6 +2697,10 @@ select {
     justify-content: flex-start;
   }
 
+  .manual-transaction-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .date-inline {
     grid-template-columns: 1fr;
   }
@@ -2775,6 +2785,10 @@ select {
   .ledger-advanced-grid {
     grid-template-columns: 1fr;
     padding: 12px;
+  }
+
+  .manual-transaction-grid {
+    grid-template-columns: 1fr;
   }
 
   .panel {
