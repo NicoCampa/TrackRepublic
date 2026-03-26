@@ -52,6 +52,7 @@ export const SOURCE_LABELS: Record<string, string> = {
   manual_rule: "Manual rule",
   rule: "Built-in rule",
   llm: "Local AI model",
+  llm_web: "Web-enriched AI",
   fallback: "Fallback",
 };
 

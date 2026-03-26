@@ -1,12 +1,13 @@
 import { existsSync, statSync } from "node:fs";
 import { CATEGORY_CACHE_PATH, PIPELINE_SUMMARY_PATH, loadPipelineSummarySync, type PipelineSummary } from "./config-store";
 import { getBaseDashboardSnapshotKey, loadBaseDashboardData } from "./dashboard-data";
-import { readCacheInspection } from "./pipeline-jobs";
+import { readPipelineSnapshot, type PipelineJob } from "./pipeline-jobs";
 
 export type OperationsData = {
   transactions: Awaited<ReturnType<typeof loadBaseDashboardData>>["transactions"];
   pipelineSummary: PipelineSummary | null;
-  cache: Awaited<ReturnType<typeof readCacheInspection>>;
+  cache: Awaited<ReturnType<typeof readPipelineSnapshot>>["cache"];
+  latestJob: PipelineJob | null;
 };
 
 type PromiseCacheEntry<T> = {
@@ -37,15 +38,16 @@ export async function loadOperationsData(): Promise<OperationsData> {
 
   const promise = Promise.resolve()
     .then(async () => {
-      const [dashboardData, cache] = await Promise.all([
+      const [dashboardData, snapshot] = await Promise.all([
         loadBaseDashboardData(),
-        readCacheInspection(),
+        readPipelineSnapshot(),
       ]);
 
       return {
         transactions: dashboardData.transactions,
-        pipelineSummary: loadPipelineSummarySync(),
-        cache,
+        pipelineSummary: snapshot.summary ?? loadPipelineSummarySync(),
+        cache: snapshot.cache,
+        latestJob: snapshot.latestJob,
       };
     })
     .catch((error) => {

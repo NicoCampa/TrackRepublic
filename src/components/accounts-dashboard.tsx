@@ -33,7 +33,7 @@ import {
 import { buildInvestmentAnalytics } from "@/lib/investment-performance";
 import type { OfficialEtfExposure } from "@/lib/etf-lookthrough";
 import type { DetailView } from "./dashboard-ui";
-import { CategoryEditor, ClickableMetricGrid, DashboardShell, DataTable, DetailSheet, FilterBar, PageToolbar, Panel, PositionUnitsEditor, Section, SignedAmount, chartTooltipContentStyle, defaultFilterState } from "./dashboard-ui";
+import { CategoryEditor, ChartTooltipContent, ClickableMetricGrid, DashboardShell, DataTable, DetailSheet, FilterBar, PageToolbar, Panel, PositionUnitsEditor, Section, SignedAmount, defaultFilterState } from "./dashboard-ui";
 
 const ASSET_CLASS_LABELS: Record<string, string> = {
   crypto: "Crypto",
@@ -220,7 +220,7 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
         .map((row) => ({
           rowId: row.rowId,
           date: formatDisplayDate(row.date),
-          merchant: row.merchant,
+          merchant: row.displayMerchant,
           category: row.categoryLabel,
           categoryKey: row.category,
           categoryLabel: row.categoryLabel,
@@ -384,7 +384,7 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
                         <Cell key={entry.name} fill={index === 0 ? "hsl(var(--accent-primary))" : "hsl(var(--accent-secondary))"} stroke="none" />
                       ))}
                     </Pie>
-                    <Tooltip contentStyle={chartTooltipContentStyle} formatter={(value) => formatEuro(Number(value))} />
+                    <Tooltip content={<ChartTooltipContent formatValue={(value) => formatEuro(Number(value))} />} />
                     <Legend iconType="circle" />
                   </PieChart>
                 </ResponsiveContainer>
@@ -403,7 +403,7 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
                   <CartesianGrid stroke="hsla(var(--text), 0.05)" vertical={false} />
                   <XAxis dataKey="date" stroke="hsl(var(--text-muted))" fontSize={11} tickLine={false} axisLine={false} tickFormatter={(value) => formatDisplayDate(String(value))} />
                   <YAxis stroke="hsl(var(--text-muted))" fontSize={11} tickLine={false} axisLine={false} tickFormatter={(value) => `€${value}`} />
-                  <Tooltip contentStyle={chartTooltipContentStyle} labelFormatter={(value) => formatDisplayDate(String(value))} formatter={(value) => formatEuro(Number(value))} />
+                  <Tooltip content={<ChartTooltipContent formatLabel={(value) => formatDisplayDate(String(value))} formatValue={(value) => formatEuro(Number(value))} />} />
                   <Legend iconType="circle" />
                   <Line type="monotone" dataKey="marketValueEur" name="Portfolio value" stroke="hsl(var(--accent-primary))" strokeWidth={3} dot={false} />
                   <Line type="monotone" dataKey="costBasisEur" name="Cost basis" stroke="hsl(var(--accent-secondary))" strokeWidth={3} dot={false} />
@@ -419,7 +419,7 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
                   <CartesianGrid stroke="hsla(var(--text), 0.05)" vertical={false} />
                   <XAxis dataKey="date" stroke="hsl(var(--text-muted))" fontSize={11} tickLine={false} axisLine={false} tickFormatter={(value) => formatDisplayDate(String(value))} />
                   <YAxis stroke="hsl(var(--text-muted))" fontSize={11} tickLine={false} axisLine={false} tickFormatter={(value) => `€${value}`} />
-                  <Tooltip contentStyle={chartTooltipContentStyle} labelFormatter={(value) => formatDisplayDate(String(value))} formatter={(value) => formatEuro(Number(value), { signed: true })} />
+                  <Tooltip content={<ChartTooltipContent formatLabel={(value) => formatDisplayDate(String(value))} formatValue={(value) => formatEuro(Number(value), { signed: true })} />} />
                   <Legend iconType="circle" />
                   <Bar dataKey="realizedPnlEur" name="Realized P&L" fill="hsl(var(--accent-tertiary))" />
                   <Bar dataKey="dividendIncomeEur" name="Dividends" fill="hsl(var(--accent-primary))" />
@@ -577,7 +577,7 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
                     <CartesianGrid stroke="hsla(var(--text), 0.05)" vertical={false} />
                     <XAxis dataKey="displayMonthLabel" stroke="hsl(var(--text-muted))" fontSize={11} tickLine={false} axisLine={false} />
                     <YAxis stroke="hsl(var(--text-muted))" fontSize={11} tickLine={false} axisLine={false} tickFormatter={(value) => `€${value}`} />
-                    <Tooltip contentStyle={chartTooltipContentStyle} formatter={(value) => formatEuro(Number(value), { signed: true })} />
+                    <Tooltip content={<ChartTooltipContent formatValue={(value) => formatEuro(Number(value), { signed: true })} />} />
                     <Legend iconType="circle" />
                     <Bar dataKey="amount" name="Net flow">
                       {accountMovementRows.map((entry) => (
@@ -645,7 +645,7 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
                 .map((row) => ({
                   rowId: row.rowId,
                   date: formatDisplayDate(row.date),
-                  merchant: row.merchant,
+                  merchant: row.displayMerchant,
                   category: row.categoryLabel,
                   categoryKey: row.category,
                   categoryLabel: row.categoryLabel,

@@ -273,17 +273,24 @@ function deriveCurrenciesFromCountries(countries: ExposureSlice[]): ExposureSlic
 async function fetchPdfText(url: string): Promise<string> {
   const cached = pdfTextCache.get(url);
   if (!cached || Date.now() - cached.loadedAt > CACHE_TTL_MS) {
+    const promise = (async () => {
+      try {
+        const scriptPath = resolveRuntimeScript("extract_pdf_text.mjs");
+        return execFileSync(process.execPath, [scriptPath, url], {
+          encoding: "utf8",
+          maxBuffer: 20 * 1024 * 1024,
+        });
+      } catch {
+        pdfTextCache.delete(url);
+        return "";
+      }
+    })();
+
     pdfTextCache.set(
       url,
       {
         loadedAt: Date.now(),
-        promise: (async () => {
-          const scriptPath = resolveRuntimeScript("extract_pdf_text.mjs");
-          return execFileSync(process.execPath, [scriptPath, url], {
-            encoding: "utf8",
-            maxBuffer: 20 * 1024 * 1024,
-          });
-        })(),
+        promise,
       },
     );
   }
@@ -293,19 +300,30 @@ async function fetchPdfText(url: string): Promise<string> {
 async function fetchHtmlText(url: string): Promise<string> {
   const cached = htmlTextCache.get(url);
   if (!cached || Date.now() - cached.loadedAt > CACHE_TTL_MS) {
+    const promise = (async () => {
+      try {
+        const response = await fetch(url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0",
+          },
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          htmlTextCache.delete(url);
+          return "";
+        }
+        return response.text();
+      } catch {
+        htmlTextCache.delete(url);
+        return "";
+      }
+    })();
+
     htmlTextCache.set(
       url,
       {
         loadedAt: Date.now(),
-        promise: (async () => {
-          const response = await fetch(url, {
-            headers: {
-              "User-Agent": "Mozilla/5.0",
-            },
-            cache: "no-store",
-          });
-          return response.ok ? response.text() : "";
-        })(),
+        promise,
       },
     );
   }
@@ -454,23 +472,30 @@ async function loadExposureForInstrument(
 ): Promise<OfficialEtfExposure | null> {
   const cached = exposureCache.get(instrumentKey);
   if (!cached || Date.now() - cached.loadedAt > CACHE_TTL_MS) {
+    const promise = (async () => {
+      try {
+        if (providerKey === "vanguard_all_world") {
+          return await loadVanguardAllWorldExposure();
+        }
+        if (providerKey === "amundi_stoxx_europe_600") {
+          return await loadAmundiEuropeExposure();
+        }
+        if (ISHARES_PROVIDER_URLS[providerKey]) {
+          const config = ISHARES_PROVIDER_URLS[providerKey];
+          return await loadIsharesExposure(instrumentKey, instrument || config.instrument, config.url);
+        }
+        return null;
+      } catch {
+        exposureCache.delete(instrumentKey);
+        return null;
+      }
+    })();
+
     exposureCache.set(
       instrumentKey,
       {
         loadedAt: Date.now(),
-        promise: (async () => {
-          if (providerKey === "vanguard_all_world") {
-            return loadVanguardAllWorldExposure();
-          }
-          if (providerKey === "amundi_stoxx_europe_600") {
-            return loadAmundiEuropeExposure();
-          }
-          if (ISHARES_PROVIDER_URLS[providerKey]) {
-            const config = ISHARES_PROVIDER_URLS[providerKey];
-            return loadIsharesExposure(instrumentKey, instrument || config.instrument, config.url);
-          }
-          return null;
-        })(),
+        promise,
       },
     );
   }
@@ -493,7 +518,11 @@ export async function loadOfficialEtfExposures(
   const exposures = await Promise.all(
     instruments.map(async ({ instrumentKey, instrument }) => {
       const providerKey = registry[instrumentKey]?.lookthroughProvider || fallbackLookthroughProvider(instrumentKey);
-      return [instrumentKey, await loadExposureForInstrument(instrumentKey, instrument, providerKey)] as const;
+      try {
+        return [instrumentKey, await loadExposureForInstrument(instrumentKey, instrument, providerKey)] as const;
+      } catch {
+        return [instrumentKey, null] as const;
+      }
     }),
   );
 

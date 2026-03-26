@@ -2,15 +2,19 @@
 
 import { useDeferredValue, useEffect, useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { CornerDownRight, Link2, X } from "lucide-react";
 import { buildCategoryOptionGroupsForAmount, buildCategoryOptions, categoryLabel, deriveGroupFromCategory } from "@/lib/category-config";
 import type { ManualTransactionRecord, RowOverrideRecord } from "@/lib/config-store";
 import type { TransactionRecord } from "@/lib/dashboard-data";
 import {
   applyTransactionFilters,
+  createInitialFilterState,
   formatAsOfDate,
   formatDisplayDate,
   formatEuro,
-  incompleteMonthLabels,
+  sumMoneyIn,
+  sumMoneyOut,
+  sumNetResult,
   uniqueTransactionDates,
 } from "@/lib/dashboard-utils";
 import {
@@ -18,18 +22,9 @@ import {
   DashboardShell,
   DataTable,
   FilterBar,
-  PageToolbar,
   SignedAmount,
-  defaultFilterState,
+  type TableSortState,
 } from "./dashboard-ui";
-
-function sumPositive(values: { signedAmount: number }[]) {
-  return values.reduce((sum, row) => sum + (row.signedAmount > 0 ? row.signedAmount : 0), 0);
-}
-
-function sumNegativeAbsolute(values: { signedAmount: number }[]) {
-  return values.reduce((sum, row) => sum + (row.signedAmount < 0 ? Math.abs(row.signedAmount) : 0), 0);
-}
 
 type ManualTransactionDraft = {
   date: string;
@@ -40,6 +35,69 @@ type ManualTransactionDraft = {
   transactionType: string;
 };
 
+type ConnectedExpenseDraft = {
+  date: string;
+  category: string;
+  merchant: string;
+  description: string;
+};
+
+type ConnectedRole = "net" | "member" | null;
+
+type TransactionSortKey = "date" | "merchant" | "group" | "category" | "amount";
+
+const DEFAULT_TRANSACTION_SORT: TableSortState = {
+  key: "date",
+  direction: "desc",
+};
+
+const transactionSortCollator = new Intl.Collator("en", {
+  sensitivity: "base",
+  numeric: true,
+});
+
+function compareTransactionRows(
+  left: TransactionRecord,
+  right: TransactionRecord,
+  sortState: TableSortState,
+) {
+  let comparison = 0;
+
+  switch (sortState.key as TransactionSortKey) {
+    case "merchant":
+      comparison = transactionSortCollator.compare(
+        `${left.displayMerchant} ${left.description} ${left.txType}`,
+        `${right.displayMerchant} ${right.description} ${right.txType}`,
+      );
+      break;
+    case "group":
+      comparison = transactionSortCollator.compare(
+        `${left.groupLabel} ${left.displayMerchant}`,
+        `${right.groupLabel} ${right.displayMerchant}`,
+      );
+      break;
+    case "category":
+      comparison = transactionSortCollator.compare(
+        `${left.categoryLabel} ${left.displayMerchant}`,
+        `${right.categoryLabel} ${right.displayMerchant}`,
+      );
+      break;
+    case "amount":
+      comparison = left.signedAmount - right.signedAmount;
+      break;
+    case "date":
+    default:
+      comparison = `${left.date}-${left.rowId}`.localeCompare(`${right.date}-${right.rowId}`);
+      break;
+  }
+
+  if (comparison === 0) {
+    comparison = `${left.date}-${left.rowId}`.localeCompare(`${right.date}-${right.rowId}`);
+  }
+
+  return sortState.direction === "asc" ? comparison : -comparison;
+}
+
 function createManualDraft(defaultDate: string): ManualTransactionDraft {
   return {
     date: defaultDate,
@@ -49,6 +107,39 @@ function createManualDraft(defaultDate: string): ManualTransactionDraft {
     description: "",
     transactionType: "Manual",
   };
+}
+
+function createConnectedExpenseDraft(defaultDate: string): ConnectedExpenseDraft {
+  return {
+    date: defaultDate,
+    category: "gifts",
+    merchant: "Connected expense",
+    description: "Connected expense adjustment",
+  };
+}
+
+function sameStringArray(left: string[], right: string[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function parseConnectedMeta(subcategory: string): { connectedGroupId: string | null; connectedRole: ConnectedRole } {
+  if (subcategory.startsWith("connected_expense_net:")) {
+    return {
+      connectedGroupId: subcategory.slice("connected_expense_net:".length) || null,
+      connectedRole: "net",
+    };
+  }
+  if (subcategory.startsWith("connected_expense_member:")) {
+    return {
+      connectedGroupId: subcategory.slice("connected_expense_member:".length) || null,
+      connectedRole: "member",
+    };
+  }
+  return { connectedGroupId: null, connectedRole: null };
+}
+
+function buildConnectedGroupId(date: string) {
+  return `connected-${date}-${Date.now()}`;
 }
 
 export function TransactionsDashboard({
@@ -65,7 +156,7 @@ export function TransactionsDashboard({
   const dates = uniqueTransactionDates(transactions);
   const latestKnownDate = dates.at(-1) ?? new Date().toISOString().slice(0, 10);
   const today = new Date().toISOString().slice(0, 10);
-  const [filters, setFilters] = useState(() => defaultFilterState(dates));
+  const [filters, setFilters] = useState(() => createInitialFilterState(dates, "allTime"));
   const [rowOverridesState, setRowOverridesState] = useState(rowOverrides);
   const [manualTransactionsState, setManualTransactionsState] = useState(manualTransactions);
   const [searchQuery, setSearchQuery] = useState("");
@@ -74,21 +165,27 @@ export function TransactionsDashboard({
   const [selectedSource, setSelectedSource] = useState("");
   const [selectedType, setSelectedType] = useState("");
   const [selectedDirection, setSelectedDirection] = useState<"" | "in" | "out">("");
-  const [sortKey, setSortKey] = useState<"date_desc" | "date_asc" | "amount_desc" | "amount_asc">("date_desc");
+  const [sortState, setSortState] = useState<TableSortState>(DEFAULT_TRANSACTION_SORT);
   const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
+  const [isConnectMode, setIsConnectMode] = useState(false);
+  const [showConnectedComposer, setShowConnectedComposer] = useState(false);
+  const [selectedConnectedRows, setSelectedConnectedRows] = useState<string[]>([]);
   const [selectedReviewRows, setSelectedReviewRows] = useState<string[]>([]);
   const [bulkCategory, setBulkCategory] = useState("other");
   const [isSavingReview, setIsSavingReview] = useState(false);
   const [manualDraft, setManualDraft] = useState<ManualTransactionDraft>(() => createManualDraft(latestKnownDate));
+  const [connectedExpenseDraft, setConnectedExpenseDraft] = useState<ConnectedExpenseDraft>(() => createConnectedExpenseDraft(latestKnownDate));
   const [isSavingManual, setIsSavingManual] = useState(false);
+  const [isSavingConnected, setIsSavingConnected] = useState(false);
   const [manualError, setManualError] = useState("");
+  const [connectedExpenseError, setConnectedExpenseError] = useState("");
   const deferredSearchQuery = useDeferredValue(searchQuery.trim().toLowerCase());
 
   const baseTransactions = applyTransactionFilters(transactions, filters);
-  const filteredTransactions = useMemo(() => {
-    const visible = baseTransactions.filter((row) => {
+  const matchingTransactions = useMemo(() => {
+    return baseTransactions.filter((row) => {
       if (deferredSearchQuery) {
-        const haystack = `${row.date} ${formatDisplayDate(row.date)} ${row.merchant} ${row.description} ${row.txType} ${row.categoryLabel} ${row.groupLabel}`.toLowerCase();
+        const haystack = `${row.date} ${formatDisplayDate(row.date)} ${row.displayMerchant} ${row.merchant} ${row.description} ${row.txType} ${row.categoryLabel} ${row.groupLabel}`.toLowerCase();
         if (!haystack.includes(deferredSearchQuery)) {
           return false;
         }
@@ -116,19 +213,6 @@ export function TransactionsDashboard({
       }
       return true;
     });
-
-    return visible.slice().sort((left, right) => {
-      if (sortKey === "date_asc") {
-        return `${left.date}-${left.rowId}`.localeCompare(`${right.date}-${right.rowId}`);
-      }
-      if (sortKey === "amount_desc") {
-        return Math.abs(right.signedAmount) - Math.abs(left.signedAmount);
-      }
-      if (sortKey === "amount_asc") {
-        return Math.abs(left.signedAmount) - Math.abs(right.signedAmount);
-      }
-      return `${right.date}-${right.rowId}`.localeCompare(`${left.date}-${left.rowId}`);
-    });
   }, [
     baseTransactions,
     deferredSearchQuery,
@@ -138,8 +222,12 @@ export function TransactionsDashboard({
     selectedGroup,
     selectedSource,
     selectedType,
-    sortKey,
   ]);
+
+  const filteredTransactions = useMemo(
+    () => matchingTransactions.slice().sort((left, right) => compareTransactionRows(left, right, sortState)),
+    [matchingTransactions, sortState],
+  );
   const reviewRows = useMemo(
     () =>
       filteredTransactions
@@ -152,6 +240,10 @@ export function TransactionsDashboard({
     () => reviewRows.filter((row) => selectedReviewRows.includes(row.rowId)),
     [reviewRows, selectedReviewRows],
   );
+  const selectedConnectedTransactions = useMemo(
+    () => filteredTransactions.filter((row) => selectedConnectedRows.includes(row.rowId)),
+    [filteredTransactions, selectedConnectedRows],
+  );
   const selectedOverrideIds = useMemo(
     () => selectedRows.filter((row) => rowOverrideIds.has(row.rowId)).map((row) => row.rowId),
     [rowOverrideIds, selectedRows],
@@ -159,8 +251,19 @@ export function TransactionsDashboard({
 
   useEffect(() => {
     const visibleRowIds = new Set(reviewRows.map((row) => row.rowId));
-    setSelectedReviewRows((current) => current.filter((rowId) => visibleRowIds.has(rowId)));
+    setSelectedReviewRows((current) => {
+      const next = current.filter((rowId) => visibleRowIds.has(rowId));
+      return sameStringArray(current, next) ? current : next;
+    });
   }, [reviewRows]);
+
+  useEffect(() => {
+    const visibleRowIds = new Set(filteredTransactions.map((row) => row.rowId));
+    setSelectedConnectedRows((current) => {
+      const next = current.filter((rowId) => visibleRowIds.has(rowId));
+      return sameStringArray(current, next) ? current : next;
+    });
+  }, [filteredTransactions]);
 
   useEffect(() => {
     setRowOverridesState(rowOverrides);
@@ -169,6 +272,15 @@ export function TransactionsDashboard({
   useEffect(() => {
     setManualTransactionsState(manualTransactions);
   }, [manualTransactions]);
+
+  useEffect(() => {
+    const latestSelectedDate =
+      selectedConnectedTransactions
+        .map((row) => row.date)
+        .sort()
+        .at(-1) ?? latestKnownDate;
+    setConnectedExpenseDraft((current) => (current.date === latestSelectedDate ? current : { ...current, date: latestSelectedDate }));
+  }, [latestKnownDate, selectedConnectedTransactions]);
 
   const groupOptions = baseTransactions
     .map((row) => ({ value: row.group, label: row.groupLabel }))
@@ -205,11 +317,7 @@ export function TransactionsDashboard({
         .slice(0, 10),
     [baseTransactions],
   );
-  const activeWindowLabel = filters.activeQuickLabel
-    ? `${filters.activeQuickKind === "month" ? "Month" : "Year"}: ${filters.activeQuickLabel}`
-    : "All data";
-  const partialMonths = incompleteMonthLabels(filters);
-  const latestBalance = filteredTransactions[0]?.balance ?? baseTransactions.at(-1)?.balance ?? 0;
+  const latestBalance = matchingTransactions.at(-1)?.balance ?? baseTransactions.at(-1)?.balance ?? 0;
   const activeLocalFilterCount =
     Number(Boolean(selectedGroup)) +
     selectedCategories.length +
@@ -217,40 +325,117 @@ export function TransactionsDashboard({
     Number(Boolean(selectedType)) +
     Number(Boolean(selectedDirection)) +
     Number(needsReviewOnly);
-  const localFilterSummary =
-    activeLocalFilterCount === 0 ? "No extra filters" : `${activeLocalFilterCount} active`;
-  const selectedGroupLabel = groupOptions.find((option) => option.value === selectedGroup)?.label ?? "";
-  const selectedSourceLabel = sourceOptions.find((option) => option.value === selectedSource)?.label ?? "";
-  const selectedCategoryLabels = selectedCategories
-    .map((value) => categoryOptions.find((option) => option.value === value)?.label ?? value)
-    .slice(0, 3);
-  const searchSummary = searchQuery.trim();
+  const localFilterSummary = activeLocalFilterCount === 0 ? "" : `${activeLocalFilterCount}`;
   const manualCategoryGroups = buildCategoryOptionGroupsForAmount(
     Number(manualDraft.signedAmount || "0"),
     manualDraft.category,
   );
+  const connectedCollectedAmount = selectedConnectedTransactions.reduce(
+    (sum, row) => sum + (row.signedAmount > 0 ? row.signedAmount : 0),
+    0,
+  );
+  const connectedPaidAmount = selectedConnectedTransactions.reduce(
+    (sum, row) => sum + (row.signedAmount < 0 ? Math.abs(row.signedAmount) : 0),
+    0,
+  );
+  const connectedNetAmount = selectedConnectedTransactions.reduce((sum, row) => sum + row.signedAmount, 0);
+  const connectedEligibleRows = selectedConnectedTransactions.filter((row) => row.classificationSource !== "manual_entry");
+  const connectedManualRows = selectedConnectedTransactions.filter((row) => row.classificationSource === "manual_entry");
+  const connectedExpenseCategoryGroups = buildCategoryOptionGroupsForAmount(
+    connectedNetAmount,
+    connectedExpenseDraft.category,
+  );
+  const compactSummaryItems = [
+    { label: "Rows", text: `${filteredTransactions.length.toLocaleString("en-US")} rows` },
+    { label: "Money in", text: `In ${formatEuro(sumMoneyIn(filteredTransactions))}` },
+    { label: "Money out", text: `Out ${formatEuro(sumMoneyOut(filteredTransactions))}` },
+    {
+      label: "Transfers",
+      text: `Transfers ${formatEuro(
+        filteredTransactions.reduce((sum, row) => sum + (row.group === "transfer" ? Math.abs(row.signedAmount) : 0), 0),
+      )}`,
+    },
+    { label: "Net", text: `Net ${formatEuro(sumNetResult(filteredTransactions), { signed: true })}` },
+    { label: "Balance", text: `Bal ${formatEuro(latestBalance)}` },
+  ];
+  const transactionSortSummary = `${
+    {
+      date: "Date",
+      merchant: "Details",
+      group: "Group",
+      category: "Category",
+      amount: "Amount",
+    }[sortState.key as TransactionSortKey] ?? "Date"
+  } · ${sortState.direction === "asc" ? "ascending" : "descending"}`;
 
-  const rows = filteredTransactions.map((row) => ({
-    rowId: row.rowId,
-    date: formatDisplayDate(row.date),
-    txType: row.txType,
-    merchant: row.merchant,
-    description: row.description,
-    group: row.groupLabel,
-    category: row.categoryLabel,
-    categoryKey: row.category,
-    categoryLabel: row.categoryLabel,
-    signedAmount: row.signedAmount,
-    amount: row.signedAmount,
-    balance: row.balance,
-    source: row.classificationSourceLabel,
-    needsReview: row.needsReview ? "Check" : "",
-  }));
+  const transactionRows = filteredTransactions.map((row) => {
+    const connection = parseConnectedMeta(row.subcategory);
+    return {
+      selected: selectedConnectedRows.includes(row.rowId),
+      rowId: row.rowId,
+      date: formatDisplayDate(row.date),
+      txType: row.txType,
+      merchant: row.displayMerchant,
+      description: row.description,
+      group: row.groupLabel,
+      category: row.categoryLabel,
+      categoryKey: row.category,
+      categoryLabel: row.categoryLabel,
+      signedAmount: row.signedAmount,
+      amount: row.signedAmount,
+      balance: row.balance,
+      sourceKey: row.classificationSource,
+      needsReview: row.needsReview ? "Check" : "",
+      connectedGroupId: connection.connectedGroupId,
+      connectedRole: connection.connectedRole,
+      isConnectedSelectable: row.classificationSource !== "manual_entry" && !connection.connectedGroupId,
+    };
+  });
+  const rows = useMemo(() => {
+    const groups = new Map<string, typeof transactionRows>();
+    for (const row of transactionRows) {
+      if (!row.connectedGroupId) {
+        continue;
+      }
+      const current = groups.get(row.connectedGroupId) ?? [];
+      current.push(row);
+      groups.set(row.connectedGroupId, current);
+    }
+
+    const seenGroups = new Set<string>();
+    const ordered: Array<(typeof transactionRows)[number] & { treeDepth: number; treeRole: ConnectedRole }> = [];
+
+    for (const row of transactionRows) {
+      if (!row.connectedGroupId) {
+        ordered.push({ ...row, treeDepth: 0, treeRole: null });
+        continue;
+      }
+      if (seenGroups.has(row.connectedGroupId)) {
+        continue;
+      }
+
+      seenGroups.add(row.connectedGroupId);
+      const cluster = groups.get(row.connectedGroupId) ?? [row];
+      const netRow = cluster.find((item) => item.connectedRole === "net") ?? null;
+      const members = cluster
+        .filter((item) => item.connectedRole !== "net")
+        .sort((left, right) => `${right.date}-${right.rowId}`.localeCompare(`${left.date}-${left.rowId}`));
+
+      if (netRow) {
+        ordered.push({ ...netRow, treeDepth: 0, treeRole: "net" });
+      }
+      for (const member of members) {
+        ordered.push({ ...member, treeDepth: netRow ? 1 : 0, treeRole: "member" });
+      }
+    }
+
+    return ordered;
+  }, [transactionRows]);
   const reviewTableRows = reviewRows.slice(0, 120).map((row) => ({
     selected: selectedReviewRows.includes(row.rowId),
     rowId: row.rowId,
     date: formatDisplayDate(row.date),
-    merchant: row.merchant,
+    merchant: row.displayMerchant,
     description: row.description,
     txType: row.txType,
     category: row.categoryLabel,
@@ -258,7 +443,6 @@ export function TransactionsDashboard({
     categoryLabel: row.categoryLabel,
     signedAmount: row.signedAmount,
     amount: row.signedAmount,
-    source: row.classificationSourceLabel,
   }));
   const manualRows = manualTransactionsState
     .slice()
@@ -291,14 +475,18 @@ export function TransactionsDashboard({
   };
 
   const clearLocalFilters = () => {
+    setFilters(createInitialFilterState(dates, "allTime"));
     setSearchQuery("");
     setSelectedGroup("");
     setSelectedCategories([]);
     setSelectedSource("");
     setSelectedType("");
     setSelectedDirection("");
-    setSortKey("date_desc");
+    setSortState(DEFAULT_TRANSACTION_SORT);
     setNeedsReviewOnly(false);
+    setIsConnectMode(false);
+    setShowConnectedComposer(false);
+    setSelectedConnectedRows([]);
     setSelectedReviewRows([]);
   };
 
@@ -306,6 +494,25 @@ export function TransactionsDashboard({
     setSelectedCategories((current) =>
       current.includes(category) ? current.filter((value) => value !== category) : [...current, category],
     );
+  };
+
+  const startConnectMode = (rowId: string) => {
+    setIsConnectMode(true);
+    setShowConnectedComposer(false);
+    setConnectedExpenseError("");
+    setSelectedConnectedRows((current) => (current.includes(rowId) ? current : [...current, rowId]));
+  };
+
+  const toggleConnectedRow = (rowId: string) => {
+    setSelectedConnectedRows((current) => (current.includes(rowId) ? current.filter((value) => value !== rowId) : [...current, rowId]));
+  };
+
+  const cancelConnectMode = () => {
+    setIsConnectMode(false);
+    setShowConnectedComposer(false);
+    setSelectedConnectedRows([]);
+    setConnectedExpenseDraft(createConnectedExpenseDraft(latestKnownDate));
+    setConnectedExpenseError("");
   };
 
   const upsertOverrides = async (mode: "categorize" | "clear_review") => {
@@ -318,7 +525,7 @@ export function TransactionsDashboard({
       description: row.description,
       transactionType: row.txType,
       signedAmount: row.signedAmount,
-      merchant: row.merchant,
+      merchant: row.displayMerchant,
       group: deriveGroupFromCategory(mode === "categorize" ? bulkCategory : row.category),
       category: mode === "categorize" ? bulkCategory : row.category,
       subcategory: "row_override",
@@ -430,64 +637,130 @@ export function TransactionsDashboard({
     }
   };
 
+  const submitSharedExpenseAdjustment = async () => {
+    const signedAmount = connectedNetAmount;
+
+    if (selectedConnectedTransactions.length === 0) {
+      setConnectedExpenseError("Select the rows to connect from the transaction table first.");
+      return;
+    }
+
+    if (connectedManualRows.length > 0) {
+      setConnectedExpenseError("Connected expenses can only be created from imported rows, not existing manual rows.");
+      return;
+    }
+
+    if (!connectedExpenseDraft.date || signedAmount === 0 || !connectedExpenseDraft.category) {
+      setConnectedExpenseError("A date, category, and non-zero net amount are required.");
+      return;
+    }
+
+    const rowId = `manual-${connectedExpenseDraft.date}-connected-expense-${Date.now()}`;
+    const connectedGroupId = buildConnectedGroupId(connectedExpenseDraft.date);
+
+    setIsSavingConnected(true);
+    setConnectedExpenseError("");
+    setManualError("");
+    try {
+      const manualResponse = await fetch("/api/manual-transactions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transaction: {
+            rowId,
+            date: connectedExpenseDraft.date,
+            transactionType: "Connected expense",
+            merchant: connectedExpenseDraft.merchant.trim() || "Connected expense",
+            description: connectedExpenseDraft.description.trim() || "Connected expense adjustment",
+            signedAmount,
+            category: connectedExpenseDraft.category,
+            subcategory: `connected_expense_net:${connectedGroupId}`,
+          },
+        }),
+      });
+      if (!manualResponse.ok) {
+        const payload = (await manualResponse.json().catch(() => null)) as { message?: string } | null;
+        setConnectedExpenseError(payload?.message ?? "Could not save the connected expense adjustment.");
+        return;
+      }
+
+      const overrides = connectedEligibleRows.map((row) => ({
+        rowId: row.rowId,
+        description: row.description,
+        transactionType: row.txType,
+        signedAmount: row.signedAmount,
+        merchant: row.merchant,
+        group: "transfer",
+        category: "peer_transfer",
+        subcategory: `connected_expense_member:${connectedGroupId}`,
+        confidence: 0.99,
+        needsReview: false,
+        source: "row_override",
+        updatedAt: new Date().toISOString(),
+      }));
+
+      const overrideResponse = await fetch("/api/row-overrides", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ overrides }),
+      });
+
+      if (!overrideResponse.ok) {
+        await fetch("/api/manual-transactions", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rowId }),
+        }).catch(() => null);
+        const payload = (await overrideResponse.json().catch(() => null)) as { message?: string } | null;
+        setConnectedExpenseError(payload?.message ?? "Could not connect the selected rows.");
+        return;
+      }
+
+      await syncManualTransactions(manualResponse);
+      await syncOverrides(overrideResponse);
+      setIsConnectMode(false);
+      setShowConnectedComposer(false);
+      setSelectedConnectedRows([]);
+      setConnectedExpenseDraft(createConnectedExpenseDraft(connectedExpenseDraft.date));
+    } finally {
+      setIsSavingConnected(false);
+    }
+  };
+
   return (
     <DashboardShell
       kicker="Transactions"
-      title="Ledger and review"
-      description="Search, fix, and clear the review queue from one place."
-      meta={`Updated as of ${formatAsOfDate(transactions.at(-1)?.date ?? filters.endDate)}`}
+      description=""
+      hideHero
     >
-      <PageToolbar
-        items={[
-          activeWindowLabel,
-          `Needs checking: ${reviewRows.length.toLocaleString("en-US")}`,
-          `Overrides: ${rowOverridesState.length.toLocaleString("en-US")}`,
-          `Manual entries: ${manualTransactionsState.length.toLocaleString("en-US")}`,
-          searchSummary ? `Search: ${searchSummary}` : "",
-          selectedDirection === "in" ? "Money in only" : selectedDirection === "out" ? "Money out only" : "",
-          selectedGroupLabel ? `Group: ${selectedGroupLabel}` : "",
-          ...selectedCategoryLabels.map((label) => `Category: ${label}`),
-          selectedCategories.length > selectedCategoryLabels.length
-            ? `+${selectedCategories.length - selectedCategoryLabels.length} more categories`
-            : "",
-          selectedType ? `Type: ${selectedType}` : "",
-          selectedSourceLabel ? `Source: ${selectedSourceLabel}` : "",
-          needsReviewOnly ? "Needs checking only" : "",
-          partialMonths.length > 0 ? `Partial months: ${partialMonths.join(", ")}` : "",
-        ]}
-      >
-        <div className="ledger-toolbar-main">
-          <FilterBar dates={dates} filters={filters} onChange={setFilters} compact summaryLabel="Period" />
-          <div className="ledger-search-field field">
-            <label htmlFor="transactionSearch">Search</label>
+      <section className="ledger-commandbar">
+        <div className="ledger-commandbar-row">
+          <div className="ledger-commandbar-title">
+            <strong>Transactions</strong>
+          </div>
+          <div className="ledger-commandbar-period">
+            <FilterBar dates={dates} filters={filters} onChange={setFilters} compact summaryLabel="Period" />
+          </div>
+          <div className="ledger-commandbar-search">
+            <label htmlFor="transactionSearch" className="sr-only">Search</label>
             <input
               id="transactionSearch"
               value={searchQuery}
-              placeholder="Merchant, description, type, date"
+              placeholder="Search merchant, note, or category"
               onChange={(event) => setSearchQuery(event.target.value)}
             />
           </div>
-          <div className="ledger-select-field field">
-            <label htmlFor="transactionSort">Sort</label>
-            <select id="transactionSort" value={sortKey} onChange={(event) => setSortKey(event.target.value as typeof sortKey)}>
-              <option value="date_desc">Newest first</option>
-              <option value="date_asc">Oldest first</option>
-              <option value="amount_desc">Largest amount</option>
-              <option value="amount_asc">Smallest amount</option>
-            </select>
-          </div>
-          <div className="ledger-filter-actions">
-            <button type="button" className="quick-button quick-button-ghost" onClick={clearLocalFilters}>
-              Reset
-            </button>
-          </div>
+          <button type="button" className="quick-button quick-button-ghost ledger-commandbar-reset" onClick={clearLocalFilters}>
+            Reset
+          </button>
+          <span className="ledger-commandbar-updated">Updated {formatAsOfDate(transactions.at(-1)?.date ?? filters.endDate)}</span>
         </div>
 
-        <details className="details ledger-local-details">
+        <details className="details ledger-local-details ledger-inline-details">
           <summary>
-            <span className="filterbar-summary-title">More filters</span>
-            <span className="filterbar-summary-meta">{localFilterSummary}</span>
-            {needsReviewOnly ? <span className="filterbar-summary-badge">Needs checking</span> : null}
+            <span className="filterbar-summary-title">Filters</span>
+            {localFilterSummary ? <span className="filterbar-summary-meta">{localFilterSummary} active</span> : null}
+            {needsReviewOnly ? <span className="filterbar-summary-badge">Review only</span> : null}
           </summary>
           <div className="ledger-filter-bar">
             <div className="ledger-filter-top">
@@ -604,289 +877,492 @@ export function TransactionsDashboard({
             </div>
           </div>
         </details>
-      </PageToolbar>
+      </section>
 
       <div className="ledger-summary-strip" aria-label="Ledger summary">
-        <div className="ledger-summary-item">
-          <span className="ledger-summary-label">Rows</span>
-          <strong>{filteredTransactions.length.toLocaleString("en-US")}</strong>
-        </div>
-        <div className="ledger-summary-item">
-          <span className="ledger-summary-label">Money in</span>
-          <strong>{formatEuro(sumPositive(filteredTransactions))}</strong>
-        </div>
-        <div className="ledger-summary-item">
-          <span className="ledger-summary-label">Money out</span>
-          <strong>{formatEuro(sumNegativeAbsolute(filteredTransactions))}</strong>
-        </div>
-        <div className="ledger-summary-item">
-          <span className="ledger-summary-label">Last visible balance</span>
-          <strong>{formatEuro(latestBalance)}</strong>
-        </div>
-        <div className="ledger-summary-item">
-          <span className="ledger-summary-label">Needs checking</span>
-          <strong>{reviewRows.length.toLocaleString("en-US")}</strong>
-        </div>
-        <div className="ledger-summary-item">
-          <span className="ledger-summary-label">Manual entries</span>
-          <strong>{manualTransactionsState.length.toLocaleString("en-US")}</strong>
-        </div>
+        {compactSummaryItems.map((item) => (
+          <div key={item.label} className="ledger-summary-item" aria-label={`${item.label}: ${item.text}`}>
+            <strong>{item.text}</strong>
+          </div>
+        ))}
+        {reviewRows.length > 0 ? (
+          <div className="ledger-summary-item" aria-label={`Review: ${reviewRows.length.toLocaleString("en-US")} rows`}>
+            <strong>{reviewRows.length.toLocaleString("en-US")} review</strong>
+          </div>
+        ) : null}
+        {manualTransactionsState.length > 0 ? (
+          <div className="ledger-summary-item" aria-label={`Manual: ${manualTransactionsState.length.toLocaleString("en-US")} entries`}>
+            <strong>{manualTransactionsState.length.toLocaleString("en-US")} manual</strong>
+          </div>
+        ) : null}
       </div>
 
-      <details className="details ledger-local-details ledger-details">
-        <summary>
-          <span className="filterbar-summary-title">Manual transaction</span>
-          <span className="filterbar-summary-meta">Add cashflow that is missing from the imported ledger</span>
-          {manualTransactionsState.length > 0 ? (
-            <span className="filterbar-summary-badge">{manualTransactionsState.length} saved</span>
-          ) : null}
-        </summary>
-        <div className="ledger-filter-bar">
-          <div className="manual-transaction-grid">
-            <div className="field">
-              <label htmlFor="manualDate">Date</label>
-              <input
-                id="manualDate"
-                type="date"
-                value={manualDraft.date}
-                min={dates[0]}
-                max={today}
-                onChange={(event) => setManualDraft((current) => ({ ...current, date: event.target.value }))}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="manualAmount">Amount</label>
-              <input
-                id="manualAmount"
-                type="number"
-                step="0.01"
-                placeholder="-18.40 or 2500"
-                value={manualDraft.signedAmount}
-                onChange={(event) => setManualDraft((current) => ({ ...current, signedAmount: event.target.value }))}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="manualCategory">Category</label>
-              <select
-                id="manualCategory"
-                value={manualDraft.category}
-                onChange={(event) => setManualDraft((current) => ({ ...current, category: event.target.value }))}
-              >
-                {manualCategoryGroups.map((group) => (
-                  <optgroup key={group.label} label={group.label}>
-                    {group.options.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-              </select>
-            </div>
-            <div className="field">
-              <label htmlFor="manualType">Type</label>
-              <input
-                id="manualType"
-                value={manualDraft.transactionType}
-                placeholder="Manual"
-                onChange={(event) => setManualDraft((current) => ({ ...current, transactionType: event.target.value }))}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="manualMerchant">Merchant</label>
-              <input
-                id="manualMerchant"
-                value={manualDraft.merchant}
-                placeholder="Merchant or source"
-                onChange={(event) => setManualDraft((current) => ({ ...current, merchant: event.target.value }))}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="manualDescription">Description</label>
-              <input
-                id="manualDescription"
-                value={manualDraft.description}
-                placeholder="What happened"
-                onChange={(event) => setManualDraft((current) => ({ ...current, description: event.target.value }))}
-              />
-            </div>
+      {isConnectMode ? (
+        <section className="connect-mode-bar" aria-label="Connected expense mode">
+          <div className="connect-mode-head">
+            <span className="connect-mode-pill">
+              <Link2 size={14} aria-hidden="true" />
+              Connect mode
+            </span>
+            <strong>{selectedConnectedRows.length} selected</strong>
+            <span>{`Collected ${formatEuro(connectedCollectedAmount)} · Paid ${formatEuro(connectedPaidAmount)} · Net ${formatEuro(connectedNetAmount, { signed: true })}`}</span>
           </div>
-
-          <div className="button-row">
+          <div className="connect-mode-actions">
             <button
               type="button"
               className="quick-button"
-              onClick={() => void submitManualTransaction()}
-              disabled={isSavingManual || isRefreshingData}
+              onClick={() => setShowConnectedComposer((current) => !current)}
+              disabled={isSavingConnected || isRefreshingData || selectedConnectedRows.length === 0}
             >
-              Add transaction
+              {showConnectedComposer ? "Hide connect" : "Connect"}
             </button>
             <button
               type="button"
               className="quick-button quick-button-ghost"
-              onClick={() => {
-                setManualDraft(createManualDraft(latestKnownDate));
-                setManualError("");
-              }}
-              disabled={isSavingManual || isRefreshingData}
+              onClick={cancelConnectMode}
+              disabled={isSavingConnected || isRefreshingData}
             >
-              Clear form
+              Cancel
             </button>
-            <span className="helper-copy">Use negative amounts for money out and positive amounts for money in.</span>
           </div>
-          {manualError ? <div className="table-action-error">{manualError}</div> : null}
+        </section>
+      ) : null}
 
-          <DataTable
-            density="compact"
-            rows={manualRows}
-            emptyMessage="No manual transactions saved yet."
-            columns={[
-              { key: "date", label: "Date", cellClassName: "cell-nowrap" },
-              { key: "txType", label: "Type", cellClassName: "cell-nowrap" },
-              { key: "merchant", label: "Merchant" },
-              { key: "description", label: "Description", cellClassName: "cell-description" },
-              { key: "category", label: "Category", render: (_value, row) => <CategoryEditor row={row} /> },
-              {
-                key: "amount",
-                label: "Amount",
-                align: "right",
-                cellClassName: "cell-nowrap",
-                render: (value) => <SignedAmount value={Number(value)} />,
-              },
-              {
-                key: "action",
-                label: "",
-                align: "right",
-                cellClassName: "cell-nowrap",
-                render: (_value, row) => (
+      <section className="ledger-table-shell">
+        <div className="ledger-table-head">
+          <div className="ledger-table-head-main">
+            <strong>Transaction ledger</strong>
+            <span>{filteredTransactions.length.toLocaleString("en-US")} visible rows</span>
+          </div>
+          <div className="ledger-table-head-meta">
+            <span className="ledger-table-meta-pill">{transactionSortSummary}</span>
+            <span className="ledger-table-meta-copy">Click a header to reorder</span>
+          </div>
+        </div>
+
+        <DataTable
+          density="compact"
+          rows={rows}
+          rowKey="rowId"
+          stickyHeader
+          sortState={sortState}
+          onSortChange={setSortState}
+          emptyMessage="No transactions match the current filters."
+          columns={[
+            {
+              key: "selected",
+              label: "",
+              width: 42,
+              cellClassName: "cell-nowrap",
+              render: (_value, row) => {
+                const rowId = String(row.rowId);
+                const isSelected = selectedConnectedRows.includes(rowId);
+                const isConnectable = Boolean(row.isConnectedSelectable);
+                const treeRole = String(row.treeRole || "");
+
+                if (treeRole === "member") {
+                  return (
+                    <span className="connect-tree-marker" aria-hidden="true">
+                      <CornerDownRight size={14} />
+                    </span>
+                  );
+                }
+
+                if (!isConnectMode) {
+                  return isConnectable ? (
+                    <button
+                      type="button"
+                      className="connect-icon-button"
+                      onClick={() => startConnectMode(rowId)}
+                      aria-label="Start connecting transactions"
+                    >
+                      <Link2 size={15} />
+                    </button>
+                  ) : null;
+                }
+
+                return isConnectable ? (
                   <button
                     type="button"
-                    className="table-action-button table-action-button-secondary"
-                    onClick={() => void deleteManualTransaction(String(row.rowId))}
-                    disabled={isSavingManual || isRefreshingData}
+                    className="connect-icon-button"
+                    data-active={isSelected}
+                    onClick={() => toggleConnectedRow(rowId)}
+                    aria-label={isSelected ? "Remove transaction from connection" : "Add transaction to connection"}
                   >
-                    Delete
+                    <Link2 size={15} />
                   </button>
-                ),
+                ) : treeRole === "net" ? (
+                  <span className="connect-tree-marker connect-tree-marker-net" aria-hidden="true">
+                    <Link2 size={14} />
+                  </span>
+                ) : null;
               },
-            ]}
-          />
-        </div>
-      </details>
+            },
+            { key: "date", label: "Date", cellClassName: "cell-nowrap", sortable: true, sortKey: "date", sortDefaultDirection: "desc" },
+            {
+              key: "merchant",
+              label: "Details",
+              cellClassName: "cell-description",
+              sortable: true,
+              sortKey: "merchant",
+              render: (_value, row) => (
+                <div
+                  className="table-transaction-cell"
+                  data-tree-role={String(row.treeRole || "")}
+                  style={{ ["--tree-depth" as string]: Number(row.treeDepth ?? 0) }}
+                >
+                  {String(row.treeRole) === "member" ? <span className="table-transaction-branch" aria-hidden="true" /> : null}
+                  <strong>{String(row.merchant)}</strong>
+                  <small>
+                    {String(row.txType)}
+                    {String(row.description) && String(row.description) !== String(row.merchant) ? ` · ${String(row.description)}` : ""}
+                  </small>
+                  {String(row.treeRole) === "net" ? <span className="table-transaction-note">Connected net row</span> : null}
+                  {String(row.treeRole) === "member" ? <span className="table-transaction-note">Connected original row</span> : null}
+                </div>
+              ),
+            },
+            { key: "group", label: "Group", cellClassName: "cell-nowrap", sortable: true, sortKey: "group" },
+            { key: "category", label: "Category", sortable: true, sortKey: "category", render: (_value, row) => <CategoryEditor row={row} /> },
+            {
+              key: "amount",
+              label: "Amount",
+              align: "right",
+              cellClassName: "cell-nowrap",
+              sortable: true,
+              sortKey: "amount",
+              sortDefaultDirection: "desc",
+              render: (value) => <SignedAmount value={Number(value)} />,
+            },
+          ]}
+        />
+      </section>
 
-      <details className="details ledger-local-details ledger-details">
-        <summary>
-          <span className="filterbar-summary-title">Review queue</span>
-          <span className="filterbar-summary-meta">
-            {reviewRows.length === 0
-              ? "Nothing needs checking in this view"
-              : `${reviewRows.length.toLocaleString("en-US")} rows need checking`}
-          </span>
-          {selectedReviewRows.length > 0 ? (
-            <span className="filterbar-summary-badge">{selectedReviewRows.length} selected</span>
-          ) : null}
-        </summary>
-        <div className="ledger-filter-bar">
-          <div className="button-row">
-            <div className="field">
-              <label htmlFor="reviewBulkCategory">Category</label>
-              <select id="reviewBulkCategory" value={bulkCategory} onChange={(event) => setBulkCategory(event.target.value)}>
-                {buildCategoryOptions().map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+      <div className="ledger-secondary-stack">
+        {isConnectMode && showConnectedComposer ? (
+          <section className="manual-helper-block connected-expense-composer">
+            <div className="manual-helper-head">
+              <strong>Connect selected rows</strong>
+              <span>Turn the selected collection and payment rows into one net expense and keep the originals nested under it.</span>
             </div>
+
+            <div className="ledger-summary-strip" aria-label="Connected expense summary">
+              <div className="ledger-summary-item"><strong>Collected {formatEuro(connectedCollectedAmount)}</strong></div>
+              <div className="ledger-summary-item"><strong>Paid {formatEuro(connectedPaidAmount)}</strong></div>
+              <div className="ledger-summary-item"><strong>Net {formatEuro(connectedNetAmount, { signed: true })}</strong></div>
+            </div>
+
+            <div className="manual-helper-grid">
+              <div className="field">
+                <label htmlFor="connectedExpenseDate">Date</label>
+                <input
+                  id="connectedExpenseDate"
+                  type="date"
+                  value={connectedExpenseDraft.date}
+                  min={dates[0]}
+                  max={today}
+                  onChange={(event) => setConnectedExpenseDraft((current) => ({ ...current, date: event.target.value }))}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="connectedExpenseCategory">Net category</label>
+                <select
+                  id="connectedExpenseCategory"
+                  value={connectedExpenseDraft.category}
+                  onChange={(event) => setConnectedExpenseDraft((current) => ({ ...current, category: event.target.value }))}
+                >
+                  {connectedExpenseCategoryGroups.map((group) => (
+                    <optgroup key={group.label} label={group.label}>
+                      {group.options.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
+              <div className="field">
+                <label htmlFor="connectedExpenseMerchant">Label</label>
+                <input
+                  id="connectedExpenseMerchant"
+                  value={connectedExpenseDraft.merchant}
+                  placeholder="Connected expense"
+                  onChange={(event) => setConnectedExpenseDraft((current) => ({ ...current, merchant: event.target.value }))}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="connectedExpenseDescription">Note</label>
+                <input
+                  id="connectedExpenseDescription"
+                  value={connectedExpenseDraft.description}
+                  placeholder="Connected expense adjustment"
+                  onChange={(event) => setConnectedExpenseDraft((current) => ({ ...current, description: event.target.value }))}
+                />
+              </div>
+            </div>
+
+            <div className="button-row">
               <button
                 type="button"
                 className="quick-button"
-                onClick={() => void upsertOverrides("categorize")}
-                disabled={selectedRows.length === 0 || isSavingReview || isRefreshingData}
+                onClick={() => void submitSharedExpenseAdjustment()}
+                disabled={isSavingConnected || isRefreshingData || selectedConnectedRows.length === 0}
               >
-                Change category
-              </button>
-              <button
-                type="button"
-                className="quick-button"
-                onClick={() => void upsertOverrides("clear_review")}
-                disabled={selectedRows.length === 0 || isSavingReview || isRefreshingData}
-              >
-                Clear needs checking
+                Save connected expense
               </button>
               <button
                 type="button"
                 className="quick-button quick-button-ghost"
-                onClick={() => void deleteSelectedOverrides()}
-                disabled={selectedOverrideIds.length === 0 || isSavingReview || isRefreshingData}
+                onClick={cancelConnectMode}
+                disabled={isSavingConnected || isRefreshingData}
               >
-                Delete row override
+                <X size={14} aria-hidden="true" />
+                Cancel
               </button>
-            <span className="helper-copy">
-              {selectedRows.length === 0
-                ? "Select rows below to fix them in bulk."
-                : `${selectedRows.length} selected${selectedOverrideIds.length > 0 ? ` · ${selectedOverrideIds.length} with overrides` : ""}`}
-            </span>
+              <span className="helper-copy">
+                Original rows will be recategorized to <strong>{categoryLabel("peer_transfer")}</strong>. The new connected row keeps only the net impact.
+              </span>
+            </div>
+
+            {connectedExpenseError ? <div className="table-action-error">{connectedExpenseError}</div> : null}
+          </section>
+        ) : null}
+
+        {reviewRows.length > 0 ? (
+          <details className="details ledger-local-details ledger-details">
+            <summary>
+              <span className="filterbar-summary-title">Review</span>
+              <span className="filterbar-summary-badge">{reviewRows.length.toLocaleString("en-US")}</span>
+              {selectedReviewRows.length > 0 ? (
+                <span className="filterbar-summary-meta">{selectedReviewRows.length} selected</span>
+              ) : null}
+            </summary>
+            <div className="ledger-filter-bar">
+              <div className="button-row">
+                <div className="field">
+                  <label htmlFor="reviewBulkCategory">Category</label>
+                  <select id="reviewBulkCategory" value={bulkCategory} onChange={(event) => setBulkCategory(event.target.value)}>
+                    {buildCategoryOptions().map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  className="quick-button"
+                  onClick={() => void upsertOverrides("categorize")}
+                  disabled={selectedRows.length === 0 || isSavingReview || isRefreshingData}
+                >
+                  Change category
+                </button>
+                <button
+                  type="button"
+                  className="quick-button"
+                  onClick={() => void upsertOverrides("clear_review")}
+                  disabled={selectedRows.length === 0 || isSavingReview || isRefreshingData}
+                >
+                  Clear check
+                </button>
+                <button
+                  type="button"
+                  className="quick-button quick-button-ghost"
+                  onClick={() => void deleteSelectedOverrides()}
+                  disabled={selectedOverrideIds.length === 0 || isSavingReview || isRefreshingData}
+                >
+                  Delete override
+                </button>
+                {selectedRows.length > 0 ? (
+                  <span className="helper-copy">
+                    {selectedRows.length} selected{selectedOverrideIds.length > 0 ? ` · ${selectedOverrideIds.length} override` : ""}
+                  </span>
+                ) : null}
+              </div>
+
+              <DataTable
+                density="compact"
+                rows={reviewTableRows}
+                rowKey="rowId"
+                emptyMessage="No rows currently need checking."
+                columns={[
+                  {
+                    key: "selected",
+                    label: "",
+                    render: (_value, row) => (
+                      <input
+                        type="checkbox"
+                        checked={selectedReviewRows.includes(String(row.rowId))}
+                        onChange={(event) =>
+                          setSelectedReviewRows((current) =>
+                            event.target.checked
+                              ? [...current, String(row.rowId)]
+                              : current.filter((value) => value !== String(row.rowId)),
+                          )
+                        }
+                      />
+                    ),
+                    width: 42,
+                    cellClassName: "cell-nowrap",
+                  },
+                  { key: "date", label: "Date", cellClassName: "cell-nowrap" },
+                  { key: "merchant", label: "Merchant" },
+                  { key: "description", label: "Description", cellClassName: "cell-description" },
+                  { key: "category", label: "Category", render: (_value, row) => <CategoryEditor row={row} /> },
+                  {
+                    key: "amount",
+                    label: "Amount",
+                    align: "right",
+                    cellClassName: "cell-nowrap",
+                    render: (value) => <SignedAmount value={Number(value)} />,
+                  },
+                ]}
+              />
+            </div>
+          </details>
+        ) : null}
+
+        <details className="details ledger-local-details ledger-details">
+          <summary>
+            <span className="filterbar-summary-title">Add manual</span>
+            {manualTransactionsState.length > 0 ? (
+              <span className="filterbar-summary-badge">{manualTransactionsState.length} saved</span>
+            ) : null}
+          </summary>
+          <div className="ledger-filter-bar">
+            <div className="manual-transaction-grid">
+              <div className="field">
+                <label htmlFor="manualDate">Date</label>
+                <input
+                  id="manualDate"
+                  type="date"
+                  value={manualDraft.date}
+                  min={dates[0]}
+                  max={today}
+                  onChange={(event) => setManualDraft((current) => ({ ...current, date: event.target.value }))}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="manualAmount">Amount</label>
+                <input
+                  id="manualAmount"
+                  type="number"
+                  step="0.01"
+                  placeholder="-18.40 or 2500"
+                  value={manualDraft.signedAmount}
+                  onChange={(event) => setManualDraft((current) => ({ ...current, signedAmount: event.target.value }))}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="manualCategory">Category</label>
+                <select
+                  id="manualCategory"
+                  value={manualDraft.category}
+                  onChange={(event) => setManualDraft((current) => ({ ...current, category: event.target.value }))}
+                >
+                  {manualCategoryGroups.map((group) => (
+                    <optgroup key={group.label} label={group.label}>
+                      {group.options.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
+              <div className="field">
+                <label htmlFor="manualType">Type</label>
+                <input
+                  id="manualType"
+                  value={manualDraft.transactionType}
+                  placeholder="Manual"
+                  onChange={(event) => setManualDraft((current) => ({ ...current, transactionType: event.target.value }))}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="manualMerchant">Merchant</label>
+                <input
+                  id="manualMerchant"
+                  value={manualDraft.merchant}
+                  placeholder="Merchant or source"
+                  onChange={(event) => setManualDraft((current) => ({ ...current, merchant: event.target.value }))}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="manualDescription">Description</label>
+                <input
+                  id="manualDescription"
+                  value={manualDraft.description}
+                  placeholder="What happened"
+                  onChange={(event) => setManualDraft((current) => ({ ...current, description: event.target.value }))}
+                />
+              </div>
+            </div>
+
+            <div className="button-row">
+              <button
+                type="button"
+                className="quick-button"
+                onClick={() => void submitManualTransaction()}
+                disabled={isSavingManual || isRefreshingData}
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                className="quick-button quick-button-ghost"
+                onClick={() => {
+                  setManualDraft(createManualDraft(latestKnownDate));
+                  setManualError("");
+                }}
+                disabled={isSavingManual || isRefreshingData}
+              >
+                Clear
+              </button>
+            </div>
+            {manualError ? <div className="table-action-error">{manualError}</div> : null}
+
+            <DataTable
+              density="compact"
+              rows={manualRows}
+              rowKey="rowId"
+              emptyMessage="No manual transactions saved yet."
+              columns={[
+                { key: "date", label: "Date", cellClassName: "cell-nowrap" },
+                { key: "txType", label: "Type", cellClassName: "cell-nowrap" },
+                { key: "merchant", label: "Merchant" },
+                { key: "description", label: "Description", cellClassName: "cell-description" },
+                { key: "category", label: "Category", render: (_value, row) => <CategoryEditor row={row} /> },
+                {
+                  key: "amount",
+                  label: "Amount",
+                  align: "right",
+                  cellClassName: "cell-nowrap",
+                  render: (value) => <SignedAmount value={Number(value)} />,
+                },
+                {
+                  key: "action",
+                  label: "",
+                  align: "right",
+                  cellClassName: "cell-nowrap",
+                  render: (_value, row) => (
+                    <button
+                      type="button"
+                      className="table-action-button table-action-button-secondary"
+                      onClick={() => void deleteManualTransaction(String(row.rowId))}
+                      disabled={isSavingManual || isRefreshingData}
+                    >
+                      Delete
+                    </button>
+                  ),
+                },
+              ]}
+            />
           </div>
-
-          <DataTable
-            density="compact"
-            rows={reviewTableRows}
-            emptyMessage="No rows currently need checking."
-            columns={[
-              {
-                key: "selected",
-                label: "",
-                render: (_value, row) => (
-                  <input
-                    type="checkbox"
-                    checked={selectedReviewRows.includes(String(row.rowId))}
-                    onChange={(event) =>
-                      setSelectedReviewRows((current) =>
-                        event.target.checked
-                          ? [...current, String(row.rowId)]
-                          : current.filter((value) => value !== String(row.rowId)),
-                      )
-                    }
-                  />
-                ),
-                width: 42,
-                cellClassName: "cell-nowrap",
-              },
-              { key: "date", label: "Date", cellClassName: "cell-nowrap" },
-              { key: "merchant", label: "Merchant" },
-              { key: "description", label: "Description", cellClassName: "cell-description" },
-              { key: "category", label: "Category", render: (_value, row) => <CategoryEditor row={row} /> },
-              {
-                key: "amount",
-                label: "Amount",
-                align: "right",
-                cellClassName: "cell-nowrap",
-                render: (value) => <SignedAmount value={Number(value)} />,
-              },
-              { key: "source", label: "Source" },
-            ]}
-          />
-        </div>
-      </details>
-
-      <DataTable
-        density="compact"
-        rows={rows}
-        emptyMessage="No transactions match the current filters."
-        columns={[
-          { key: "date", label: "Date", cellClassName: "cell-nowrap" },
-          { key: "txType", label: "Type", cellClassName: "cell-nowrap" },
-          { key: "merchant", label: "Merchant" },
-          { key: "description", label: "Description", cellClassName: "cell-description" },
-          { key: "group", label: "Group", cellClassName: "cell-nowrap" },
-          { key: "category", label: "Category", render: (_value, row) => <CategoryEditor row={row} /> },
-          { key: "amount", label: "Amount", align: "right", cellClassName: "cell-nowrap", render: (value) => <SignedAmount value={Number(value)} /> },
-          { key: "balance", label: "Balance", align: "right", cellClassName: "cell-nowrap", render: (value) => <span>{formatEuro(Number(value))}</span> },
-          { key: "source", label: "Source" },
-          { key: "needsReview", label: "Check", cellClassName: "cell-nowrap" },
-        ]}
-      />
+        </details>
+      </div>
     </DashboardShell>
   );
 }

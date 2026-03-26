@@ -254,6 +254,17 @@ export function sumSpending(transactions: TransactionRecord[]): number {
   );
 }
 
+export function sumMoneyIn(transactions: TransactionRecord[]): number {
+  return transactions.reduce((sum, row) => sum + (row.signedAmount > 0 ? row.signedAmount : 0), 0);
+}
+
+export function sumMoneyOut(transactions: TransactionRecord[]): number {
+  return transactions.reduce(
+    (sum, row) => sum + (row.signedAmount < 0 && row.group !== "investment" ? Math.abs(row.signedAmount) : 0),
+    0,
+  );
+}
+
 export function sumInvesting(transactions: TransactionRecord[]): number {
   return transactions.reduce((sum, row) => sum + (row.group === "investment" ? -row.signedAmount : 0), 0);
 }
@@ -270,8 +281,8 @@ export function averageMonthlyStory(transactions: TransactionRecord[]) {
 
   return {
     months,
-    income: sumIncome(transactions) / months,
-    spending: sumSpending(transactions) / months,
+    income: sumMoneyIn(transactions) / months,
+    spending: sumMoneyOut(transactions) / months,
     investing: sumInvesting(transactions) / months,
     netResult: sumNetResult(transactions) / months,
   };
@@ -299,6 +310,8 @@ export function summarizeMonthlyStory(transactions: TransactionRecord[]) {
       monthLabel: string;
       income: number;
       spending: number;
+      cashIn: number;
+      cashOut: number;
       fixedCost: number;
       variableCost: number;
       tax: number;
@@ -313,6 +326,8 @@ export function summarizeMonthlyStory(transactions: TransactionRecord[]) {
       monthLabel: row.monthLabel,
       income: 0,
       spending: 0,
+      cashIn: 0,
+      cashOut: 0,
       fixedCost: 0,
       variableCost: 0,
       tax: 0,
@@ -323,8 +338,14 @@ export function summarizeMonthlyStory(transactions: TransactionRecord[]) {
     if (row.group === "income" && row.signedAmount > 0) {
       bucket.income += row.signedAmount;
     }
+    if (row.signedAmount > 0) {
+      bucket.cashIn += row.signedAmount;
+    }
     if (SPENDING_BUCKETS.has(row.cashflowBucket) && row.signedAmount < 0) {
       bucket.spending += Math.abs(row.signedAmount);
+    }
+    if (row.signedAmount < 0 && row.group !== "investment") {
+      bucket.cashOut += Math.abs(row.signedAmount);
     }
     if (row.cashflowBucket === "fixed_cost" && row.signedAmount < 0) {
       bucket.fixedCost += Math.abs(row.signedAmount);
@@ -381,23 +402,39 @@ export function buildIncomeMix(transactions: TransactionRecord[], limit = 8) {
 }
 
 export function topIncomeSources(transactions: TransactionRecord[], limit = 8) {
-  const totals = new Map<string, { amount: number; categoryLabel: string }>();
+  const totals = new Map<
+    string,
+    {
+      amount: number;
+      categoryLabel: string;
+      sourceLabel: string;
+      sourceKind: "merchant" | "category";
+      sourceValue: string;
+    }
+  >();
   for (const row of transactions) {
     if (row.group !== "income" || row.signedAmount <= 0) {
       continue;
     }
-    const existing = totals.get(row.merchant) ?? {
+
+    const sourceKey = `category:${row.category}`;
+    const existing = totals.get(sourceKey) ?? {
       amount: 0,
       categoryLabel: row.categoryLabel,
+      sourceLabel: row.categoryLabel,
+      sourceKind: "category" as const,
+      sourceValue: row.category,
     };
     existing.amount += row.signedAmount;
-    totals.set(row.merchant, existing);
+    totals.set(sourceKey, existing);
   }
-  return [...totals.entries()]
-    .map(([merchant, value]) => ({
-      merchant,
+  return [...totals.values()]
+    .map((value) => ({
+      sourceLabel: value.sourceLabel,
       amount: value.amount,
       categoryLabel: value.categoryLabel,
+      sourceKind: value.sourceKind,
+      sourceValue: value.sourceValue,
     }))
     .sort((left, right) => right.amount - left.amount)
     .slice(0, limit);
@@ -409,7 +446,7 @@ export function topRecurringMerchants(transactions: TransactionRecord[], limit =
     if (!row.isRecurring || row.signedAmount >= 0) {
       continue;
     }
-    totals.set(row.merchant, (totals.get(row.merchant) ?? 0) + Math.abs(row.signedAmount));
+    totals.set(row.displayMerchant, (totals.get(row.displayMerchant) ?? 0) + Math.abs(row.signedAmount));
   }
   return [...totals.entries()]
     .map(([merchant, amount]) => ({ merchant, amount }))

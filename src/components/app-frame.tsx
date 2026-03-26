@@ -5,11 +5,11 @@ import { usePathname } from "next/navigation";
 import { useMemo } from "react";
 import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
-import { DatabaseZap, LayoutDashboard, List, MessageSquareText, Wallet } from "lucide-react";
+import { DatabaseZap, LayoutDashboard, List, Wallet } from "lucide-react";
 import { BrandLogo } from "./brand-logo";
 
 const PRIMARY_LINKS = [
-  { href: "/", label: "Home", icon: LayoutDashboard },
+  { href: "/", label: "Cashflow", icon: LayoutDashboard },
   { href: "/portfolio", label: "Portfolio", icon: Wallet },
 ];
 
@@ -46,35 +46,7 @@ const UTILITY_GROUPS: UtilityGroup[] = [
       },
     ],
   },
-  {
-    title: "Tools",
-    links: [
-      {
-        href: "/assistant",
-        label: "Ask AI",
-        description: "Charts and quick questions",
-        icon: MessageSquareText,
-        activeMatch: "/assistant",
-      },
-    ],
-  },
 ];
-
-const SIDEBAR_DRAFT_KEY = "cashflow_assistant_draft";
-
-export function readQueuedAssistantDraft() {
-  if (typeof window === "undefined") {
-    return "";
-  }
-  return window.sessionStorage.getItem(SIDEBAR_DRAFT_KEY) ?? "";
-}
-
-export function clearQueuedAssistantDraft() {
-  if (typeof window === "undefined") {
-    return;
-  }
-  window.sessionStorage.removeItem(SIDEBAR_DRAFT_KEY);
-}
 
 export function AppFrame({ children }: { children: ReactNode }) {
   const pathname = usePathname() ?? "";
@@ -119,7 +91,6 @@ export function AppFrame({ children }: { children: ReactNode }) {
               <h1>Track Republic</h1>
             </div>
           </div>
-          <p>Private cashflow, portfolio, and local tools.</p>
         </div>
 
         <nav className="sidebar-nav" aria-label="Primary">
@@ -139,9 +110,6 @@ export function AppFrame({ children }: { children: ReactNode }) {
         </nav>
 
         <div className="sidebar-card">
-          <div className="sidebar-card-head">
-            <span className="sidebar-kicker">Utilities</span>
-          </div>
           <div className="sidebar-tool-groups">
             {UTILITY_GROUPS.map((group) => (
               <div key={group.title} className="sidebar-tool-group">
@@ -156,7 +124,6 @@ export function AppFrame({ children }: { children: ReactNode }) {
                         </span>
                         <span>
                           <strong>{link.label}</strong>
-                          <small>{link.description}</small>
                         </span>
                       </Link>
                     );

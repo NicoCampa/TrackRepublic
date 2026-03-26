@@ -2,11 +2,13 @@
 
 import argparse
 import csv
+import html
 import json
 import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -18,6 +20,7 @@ from typing import Optional
 
 
 OLLAMA_API_URL = "http://127.0.0.1:11434/api/chat"
+DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/?q={query}"
 DEFAULT_MODEL = "qwen3.5:9b"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANUAL_RULES = PROJECT_ROOT / "config" / "manual_category_rules.csv"
@@ -66,6 +69,36 @@ FIXED_COST_CATEGORIES = {
     "telecom",
     "utilities",
 }
+WEB_LOOKUP_SKIPPED_TYPES = {"Bonus", "Empfehlung", "Ertrag", "Handel", "Steuern", "Zinsen", "Überweisung"}
+WEB_QUERY_STOPWORDS = {
+    "APPLE",
+    "AUTHORIZED",
+    "BANKING",
+    "CARD",
+    "CARTE",
+    "CONTACTLESS",
+    "DEBIT",
+    "DIRECT",
+    "FROM",
+    "FUR",
+    "GOOGLE",
+    "INCOMING",
+    "KARTE",
+    "KARTENZAHLUNG",
+    "LASTSCHRIFT",
+    "ONLINE",
+    "OUTGOING",
+    "PAY",
+    "PAYMENT",
+    "POS",
+    "PURCHASE",
+    "REFERENCE",
+    "SEPA",
+    "TO",
+    "TRANSFER",
+    "UBERWEISUNG",
+    "VISA",
+}
 
 
 def english_output_name(value: str) -> str:
@@ -98,6 +131,7 @@ class ClassificationItem:
     description: str
     normalized_description: str
     example_amount: str
+    web_context: str = ""
 
 
 @dataclass(frozen=True)
@@ -183,6 +217,23 @@ def parse_args() -> argparse.Namespace:
         "--summary-json",
         default=None,
         help="Optional path for a pipeline summary JSON file.",
+    )
+    parser.add_argument(
+        "--disable-web-enrichment",
+        action="store_true",
+        help="Skip public web lookups for uncached merchants/products before LLM classification.",
+    )
+    parser.add_argument(
+        "--web-results",
+        type=int,
+        default=3,
+        help="Maximum number of DuckDuckGo results to include per unknown description.",
+    )
+    parser.add_argument(
+        "--web-timeout-seconds",
+        type=int,
+        default=8,
+        help="Timeout for each web lookup request.",
     )
     return parser.parse_args()
 
@@ -342,6 +393,156 @@ def build_cache_key(row: TransactionRow) -> str:
     return f"{row.tx_type}|{sign}|{normalized}"
 
 
+def should_attempt_web_lookup(item: ClassificationItem) -> bool:
+    normalized = item.normalized_description.upper()
+    if item.tx_type in WEB_LOOKUP_SKIPPED_TYPES:
+        return False
+    if item.sign == "zero":
+        return False
+    if looks_like_self_transfer(normalized):
+        return False
+    return not (
+        normalized.startswith("INCOMING TRANSFER FROM ")
+        or normalized.startswith("OUTGOING TRANSFER FOR ")
+    )
+
+
+def build_web_search_query(item: ClassificationItem) -> Optional[str]:
+    candidate = (item.normalized_description or item.description).upper()
+    candidate = re.sub(
+        r"^(APPLE PAY|CARD (?:PAYMENT|PURCHASE)|DIRECT DEBIT|GOOGLE PAY|LASTSCHRIFT|ONLINE PAYMENT|POS|SEPA(?: DIRECT DEBIT| TRANSFER)?|VISA)\s+",
+        "",
+        candidate,
+    )
+    candidate = re.sub(r"\b[A-Z]{2}\d{2}[A-Z0-9]{8,}\b", " ", candidate)
+    candidate = re.sub(r"\b[A-Z0-9*:/._-]*\d[A-Z0-9*:/._-]{5,}\b", " ", candidate)
+    candidate = re.sub(r"[^A-Z0-9&+./ -]", " ", candidate)
+
+    tokens: list[str] = []
+    for raw_token in candidate.split():
+        token = raw_token.strip(" -./")
+        if len(token) <= 2:
+            continue
+        if token in WEB_QUERY_STOPWORDS:
+            continue
+        if re.fullmatch(r"\d+", token):
+            continue
+        tokens.append(token)
+
+    if not tokens:
+        return None
+    query = " ".join(tokens[:6]).strip()
+    return query or None
+
+
+def strip_html(text: str) -> str:
+    without_tags = re.sub(r"<[^>]+>", " ", text)
+    normalized = html.unescape(without_tags)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def resolve_search_result_url(raw_url: str) -> str:
+    decoded = html.unescape(raw_url).strip()
+    if decoded.startswith("//"):
+        decoded = f"https:{decoded}"
+    parsed = urllib.parse.urlparse(decoded)
+    query = urllib.parse.parse_qs(parsed.query)
+    uddg = query.get("uddg")
+    if uddg:
+        return urllib.parse.unquote(uddg[0]).strip()
+    return decoded
+
+
+def search_duckduckgo(query: str, timeout_seconds: int, max_results: int) -> list[dict[str, str]]:
+    request = urllib.request.Request(
+        DUCKDUCKGO_HTML_URL.format(query=urllib.parse.quote_plus(query)),
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        document = response.read().decode("utf-8", "ignore")
+
+    pattern = re.compile(
+        r'class="result__a" href="(?P<href>[^"]+)">(?P<title>.*?)</a>.*?class="result__snippet"[^>]*>(?P<snippet>.*?)</a>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    results: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for match in pattern.finditer(document):
+        url = resolve_search_result_url(match.group("href"))
+        if not url or url in seen_urls:
+            continue
+        title = strip_html(match.group("title"))
+        snippet = strip_html(match.group("snippet"))
+        if not title or not snippet:
+            continue
+        seen_urls.add(url)
+        results.append({"title": title, "snippet": snippet, "url": url})
+        if len(results) >= max_results:
+            break
+    return results
+
+
+def build_web_context(item: ClassificationItem, timeout_seconds: int, max_results: int) -> str:
+    query = build_web_search_query(item)
+    if query is None:
+        return ""
+    try:
+        results = search_duckduckgo(query, timeout_seconds=timeout_seconds, max_results=max_results)
+    except (TimeoutError, urllib.error.URLError, ValueError):
+        return ""
+
+    if not results:
+        return ""
+
+    lines: list[str] = []
+    for index, result in enumerate(results, start=1):
+        hostname = urllib.parse.urlparse(result["url"]).netloc.removeprefix("www.")
+        snippet = result["snippet"]
+        if len(snippet) > 180:
+            snippet = f"{snippet[:177].rstrip()}..."
+        lines.append(f"{index}. {result['title']} — {snippet} ({hostname})")
+    return f"Search query: {query}\n" + "\n".join(lines)
+
+
+def enrich_items_with_web_context(
+    items: list[ClassificationItem], timeout_seconds: int, max_results: int
+) -> tuple[list[ClassificationItem], dict[str, int]]:
+    query_cache: dict[str, str] = {}
+    enriched_items: list[ClassificationItem] = []
+    query_count = 0
+    enriched_count = 0
+
+    for item in items:
+        if not should_attempt_web_lookup(item):
+            enriched_items.append(item)
+            continue
+
+        query = build_web_search_query(item)
+        if query is None:
+            enriched_items.append(item)
+            continue
+
+        if query not in query_cache:
+            query_count += 1
+            query_cache[query] = build_web_context(item, timeout_seconds=timeout_seconds, max_results=max_results)
+        web_context = query_cache[query]
+        if web_context:
+            enriched_count += 1
+        enriched_items.append(
+            ClassificationItem(
+                cache_key=item.cache_key,
+                tx_type=item.tx_type,
+                sign=item.sign,
+                description=item.description,
+                normalized_description=item.normalized_description,
+                example_amount=item.example_amount,
+                web_context=web_context,
+            )
+        )
+
+    return enriched_items, {"queries": query_count, "enriched": enriched_count}
+
+
 def default_classification(
     group: str,
     category: str,
@@ -426,13 +627,28 @@ def apply_row_override(classification: dict, override: RowOverride) -> dict:
     return updated
 
 
-def match_keyword_rule(description_upper: str, rules: list[tuple[list[str], str, str, str, str]]) -> Optional[dict]:
+GENERIC_MERCHANT_LABELS = {
+    "Groceries",
+    "Dining",
+    "Bar",
+    "Transport",
+    "AI Software",
+    "Health",
+    "Retail",
+    "Refund",
+    "Broadcast Fee",
+}
+
+
+def match_keyword_rule(row: TransactionRow, rules: list[tuple[list[str], str, str, str, str]]) -> Optional[dict]:
+    description_upper = row.description.upper()
     for keywords, merchant, group, category, subcategory in rules:
         if any(keyword in description_upper for keyword in keywords):
+            resolved_merchant = row.description if merchant in GENERIC_MERCHANT_LABELS else merchant
             return default_classification(
                 group=group,
                 category=category,
-                merchant=merchant,
+                merchant=resolved_merchant,
                 subcategory=subcategory,
                 confidence=0.97,
                 needs_review=False,
@@ -626,7 +842,7 @@ def classify_rule_based(row: TransactionRow) -> Optional[dict]:
         (["RUNDUNK", "RUNDFUNK ARD", "ZDF"], "Broadcast Fee", "expense", "utilities", "public_fee"),
         (["TAXFIX"], "Taxfix", "tax", "taxes", "tax_service"),
     ]
-    merchant_rule = match_keyword_rule(description_upper, merchant_rules)
+    merchant_rule = match_keyword_rule(row, merchant_rules)
     if merchant_rule is not None:
         return merchant_rule
 
@@ -652,12 +868,12 @@ def save_cache(path: Path, model: str, entries: dict[str, dict]) -> None:
         json.dump(payload, handle, indent=2, ensure_ascii=False, sort_keys=True)
 
 
-def sanitize_classification(raw: dict, fallback_description: str) -> dict:
+def sanitize_classification(raw: dict, fallback_description: str, used_web_context: bool = False) -> dict:
     group = raw.get("group", "other")
     category = raw.get("category", "other")
     merchant = str(raw.get("merchant", "")).strip() or fallback_description
     subcategory = ""
-    reason = "Classification came from the local LLM."
+    reason = "Classification came from the local LLM with public web context." if used_web_context else "Classification came from the local LLM."
     confidence = 0.82
 
     if group not in ALLOWED_GROUPS:
@@ -677,7 +893,7 @@ def sanitize_classification(raw: dict, fallback_description: str) -> dict:
         "confidence": round(confidence, 2),
         "needs_review": needs_review,
         "reason": reason,
-        "source": "llm",
+        "source": "llm_web" if used_web_context else "llm",
     }
 
 
@@ -722,6 +938,7 @@ def build_prompt(items: list[ClassificationItem]) -> str:
             "description": item.description,
             "normalized_description": item.normalized_description,
             "example_amount_eur": item.example_amount,
+            "web_context": item.web_context or "",
         }
         for item in items
     ]
@@ -743,6 +960,9 @@ def build_prompt(items: list[ClassificationItem]) -> str:
         "- Mobility, trains, flights, public transit, taxis, scooter sharing, and parking are transport or travel.\n"
         "- Brokerage, ETF, stock, BTC, ETH, or crypto trading is investment.\n"
         "- Use short, stable merchant names in merchant.\n"
+        "- If web_context is present, use it to identify the brand, merchant, or product behind unclear bank descriptors.\n"
+        "- Prefer web_context when it clearly identifies a service or merchant that the raw transaction text does not explain well.\n"
+        "- If web_context is empty or inconclusive, classify only from the transaction text.\n"
         f"Transactions:\n{json.dumps(payload, ensure_ascii=False)}"
     )
 
@@ -759,10 +979,22 @@ def call_llm_batch(model: str, items: list[ClassificationItem]) -> dict[str, dic
         raise ValueError("LLM response did not contain a results array.")
 
     by_id: dict[str, dict] = {}
+    item_by_id = {item.cache_key: item for item in items}
     for item in results:
         if not isinstance(item, dict) or "id" not in item:
             continue
-        by_id[str(item["id"])] = sanitize_classification(item, fallback_description=str(item.get("merchant", "Other")).strip() or "Other")
+        item_id = str(item["id"])
+        source_item = item_by_id.get(item_id)
+        fallback_description = (
+            source_item.normalized_description
+            if source_item is not None and source_item.normalized_description
+            else str(item.get("merchant", "Other")).strip() or "Other"
+        )
+        by_id[item_id] = sanitize_classification(
+            item,
+            fallback_description=fallback_description,
+            used_web_context=bool(source_item.web_context) if source_item is not None else False,
+        )
 
     expected_ids = {item.cache_key for item in items}
     if set(by_id) != expected_ids:
@@ -1188,6 +1420,18 @@ def main() -> None:
             )
 
     pending_items = list(items_by_key.values())
+    web_lookup_stats = {"queries": 0, "enriched": 0}
+    if pending_items and not args.disable_web_enrichment:
+        print("Looking up unknown merchants/products on the web before LLM classification...", file=sys.stderr)
+        pending_items, web_lookup_stats = enrich_items_with_web_context(
+            pending_items,
+            timeout_seconds=max(1, args.web_timeout_seconds),
+            max_results=max(1, args.web_results),
+        )
+        print(
+            f"Web enrichment added context to {web_lookup_stats['enriched']} of {len(pending_items)} uncached descriptions across {web_lookup_stats['queries']} queries.",
+            file=sys.stderr,
+        )
     if pending_items:
         print(
             f"Classifying {len(pending_items)} unique descriptions with {args.model} in batches of {args.batch_size}...",
@@ -1202,7 +1446,7 @@ def main() -> None:
             for cache_key, classification in batch_results.items():
                 classification_by_key[cache_key] = classification
                 cache_entries[cache_key] = classification
-                resolution_by_key[cache_key] = "llm" if classification.get("source") == "llm" else "fallback"
+                resolution_by_key[cache_key] = "llm" if classification.get("source") in {"llm", "llm_web"} else "fallback"
     else:
         print("No uncached descriptions required LLM classification.", file=sys.stderr)
 
@@ -1371,6 +1615,8 @@ def main() -> None:
                 "manual_rule_hits": resolution_counts["manual_rule"],
                 "built_in_rule_hits": resolution_counts["rule"],
                 "llm_classifications": resolution_counts["llm"],
+                "web_enriched_classifications": web_lookup_stats["enriched"],
+                "web_lookup_queries": web_lookup_stats["queries"],
                 "row_override_hits": row_override_hits,
                 "output_files": output_files,
                 "timestamps": {

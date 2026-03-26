@@ -147,6 +147,8 @@ export type PipelineSummary = {
   manualRuleHits?: number;
   builtInRuleHits?: number;
   llmClassifications?: number;
+  webEnrichedClassifications?: number;
+  webLookupQueries?: number;
   rowOverrideHits?: number;
   outputs?: string[];
   logs?: string[];
@@ -208,6 +210,11 @@ export function normalizePipelineSummary(payload: unknown): PipelineSummary | nu
     manualRuleHits: parseNumber(String(value.manualRuleHits ?? value.manual_rule_hits ?? ""), 0),
     builtInRuleHits: parseNumber(String(value.builtInRuleHits ?? value.built_in_rule_hits ?? ""), 0),
     llmClassifications: parseNumber(String(value.llmClassifications ?? value.llm_classifications ?? ""), 0),
+    webEnrichedClassifications: parseNumber(
+      String(value.webEnrichedClassifications ?? value.web_enriched_classifications ?? ""),
+      0,
+    ),
+    webLookupQueries: parseNumber(String(value.webLookupQueries ?? value.web_lookup_queries ?? ""), 0),
     rowOverrideHits: parseNumber(String(value.rowOverrideHits ?? value.row_override_hits ?? ""), 0),
     outputs:
       value.outputs !== undefined

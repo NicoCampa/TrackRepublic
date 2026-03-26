@@ -31,6 +31,17 @@ const CASH_CSV = "statement_transactions.csv";
 const FUND_CSV = "statement_money_market_fund.csv";
 const POSITION_OVERRIDES_CSV = "position_unit_overrides.csv";
 const LIVE_MARKET_TTL_MS = 10 * 60 * 1000;
+const GENERIC_MERCHANT_ALIASES = new Set([
+  "AI Software",
+  "Bar",
+  "Broadcast Fee",
+  "Dining",
+  "Groceries",
+  "Health",
+  "Refund",
+  "Retail",
+  "Transport",
+]);
 
 type PromiseCacheEntry<T> = {
   key: string;
@@ -47,6 +58,45 @@ function parseNumber(value: string | undefined): number {
 
 function parseBoolean(value: string | undefined): boolean {
   return (value ?? "").trim().toLowerCase() === "true";
+}
+
+function normalizeWhitespace(value: string | undefined): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function compactCounterpartyLabel(value: string): string {
+  return normalizeWhitespace(value)
+    .replace(/^incoming transfer from\s+/i, "")
+    .replace(/^outgoing transfer for\s+/i, "")
+    .replace(/\s+\([A-Z]{2}\d[^)]*\)\s*$/i, "")
+    .replace(/,\s*exchange rate:.*$/i, "")
+    .replace(/,\s*ecb rate:.*$/i, "")
+    .replace(/,\s*markup:.*$/i, "")
+    .trim();
+}
+
+function deriveDisplayMerchant(args: {
+  merchant: string;
+  description: string;
+  categoryLabel: string;
+  groupLabel: string;
+  cashflowBucketLabel: string;
+}) {
+  const merchant = normalizeWhitespace(args.merchant);
+  const description = compactCounterpartyLabel(args.description);
+  const merchantIsGeneric =
+    !merchant ||
+    merchant === "Unknown merchant" ||
+    GENERIC_MERCHANT_ALIASES.has(merchant) ||
+    merchant === args.categoryLabel ||
+    merchant === args.groupLabel ||
+    merchant === args.cashflowBucketLabel;
+
+  if (merchantIsGeneric && description) {
+    return description;
+  }
+
+  return merchant || description || "Unknown merchant";
 }
 
 function readCsv(name: string): Record<string, string>[] {
@@ -67,17 +117,28 @@ function applyManualRuleToRow(row: TransactionRecord, matchedRule: ManualRuleRec
   const nextCategory = matchedRule.category || row.category;
   const nextGroup = matchedRule.group || deriveGroupFromCategory(nextCategory);
   const nextBucket = deriveCashflowBucket(nextGroup, nextCategory);
+  const nextMerchant = matchedRule.merchant || row.merchant;
+  const nextGroupLabel = groupLabel(nextGroup);
+  const nextCategoryLabel = categoryLabel(nextCategory);
+  const nextBucketLabel = bucketLabel(nextBucket);
 
   return {
     ...row,
-    merchant: matchedRule.merchant || row.merchant,
+    merchant: nextMerchant,
+    displayMerchant: deriveDisplayMerchant({
+      merchant: nextMerchant,
+      description: row.description,
+      categoryLabel: nextCategoryLabel,
+      groupLabel: nextGroupLabel,
+      cashflowBucketLabel: nextBucketLabel,
+    }),
     group: nextGroup,
-    groupLabel: groupLabel(nextGroup),
+    groupLabel: nextGroupLabel,
     category: nextCategory,
-    categoryLabel: categoryLabel(nextCategory),
+    categoryLabel: nextCategoryLabel,
     subcategory: matchedRule.subcategory || row.subcategory,
     cashflowBucket: nextBucket,
-    cashflowBucketLabel: bucketLabel(nextBucket),
+    cashflowBucketLabel: nextBucketLabel,
     needsReview: matchedRule.needsReview,
     isFixedCost: nextGroup === "expense" && FIXED_COST_CATEGORIES.has(nextCategory),
     confidence: matchedRule.confidence || row.confidence,
@@ -90,17 +151,28 @@ function applyRowOverrideToRow(row: TransactionRecord, override: RowOverrideReco
   const nextCategory = override.category || row.category;
   const nextGroup = override.group || deriveGroupFromCategory(nextCategory);
   const nextBucket = deriveCashflowBucket(nextGroup, nextCategory);
+  const nextMerchant = override.merchant || row.merchant;
+  const nextGroupLabel = groupLabel(nextGroup);
+  const nextCategoryLabel = categoryLabel(nextCategory);
+  const nextBucketLabel = bucketLabel(nextBucket);
 
   return {
     ...row,
-    merchant: override.merchant || row.merchant,
+    merchant: nextMerchant,
+    displayMerchant: deriveDisplayMerchant({
+      merchant: nextMerchant,
+      description: row.description,
+      categoryLabel: nextCategoryLabel,
+      groupLabel: nextGroupLabel,
+      cashflowBucketLabel: nextBucketLabel,
+    }),
     group: nextGroup,
-    groupLabel: groupLabel(nextGroup),
+    groupLabel: nextGroupLabel,
     category: nextCategory,
-    categoryLabel: categoryLabel(nextCategory),
+    categoryLabel: nextCategoryLabel,
     subcategory: override.subcategory || row.subcategory,
     cashflowBucket: nextBucket,
-    cashflowBucketLabel: bucketLabel(nextBucket),
+    cashflowBucketLabel: nextBucketLabel,
     needsReview: override.needsReview,
     isFixedCost: nextGroup === "expense" && FIXED_COST_CATEGORIES.has(nextCategory),
     confidence: override.confidence || row.confidence,
@@ -146,6 +218,7 @@ export type TransactionRecord = {
   yearLabel: string;
   txType: string;
   merchant: string;
+  displayMerchant: string;
   description: string;
   group: string;
   groupLabel: string;
@@ -269,30 +342,44 @@ function loadPositionUnitOverrides(): Record<string, PositionUnitOverride> {
 
 function loadTransactions(): TransactionRecord[] {
   const transactions = readCsv(CATEGORIZED_CSV)
-    .map((row) => ({
-      rowId: row.row_id,
-      date: row.date,
-      monthLabel: row.month,
-      yearLabel: row.year,
-      txType: row.type,
-      merchant: row.merchant || "Unknown merchant",
-      description: row.description,
-      group: row.group,
-      groupLabel: groupLabel(row.group),
-      category: row.category,
-      categoryLabel: categoryLabel(row.category),
-      subcategory: row.subcategory,
-      cashflowBucket: row.cashflow_bucket,
-      cashflowBucketLabel: bucketLabel(row.cashflow_bucket),
-      signedAmount: parseNumber(row.signed_amount_eur),
-      balance: parseNumber(row.balance_eur),
-      needsReview: parseBoolean(row.needs_review),
-      isRecurring: parseBoolean(row.is_recurring),
-      isFixedCost: parseBoolean(row.is_fixed_cost),
-      confidence: parseNumber(row.confidence),
-      classificationSource: row.classification_source,
-      classificationSourceLabel: sourceLabel(row.classification_source),
-    }))
+    .map((row) => {
+      const nextGroupLabel = groupLabel(row.group);
+      const nextCategoryLabel = categoryLabel(row.category);
+      const nextBucketLabel = bucketLabel(row.cashflow_bucket);
+      const merchant = row.merchant || "Unknown merchant";
+      const description = row.description;
+      return {
+        rowId: row.row_id,
+        date: row.date,
+        monthLabel: row.month,
+        yearLabel: row.year,
+        txType: row.type,
+        merchant,
+        displayMerchant: deriveDisplayMerchant({
+          merchant,
+          description,
+          categoryLabel: nextCategoryLabel,
+          groupLabel: nextGroupLabel,
+          cashflowBucketLabel: nextBucketLabel,
+        }),
+        description,
+        group: row.group,
+        groupLabel: nextGroupLabel,
+        category: row.category,
+        categoryLabel: nextCategoryLabel,
+        subcategory: row.subcategory,
+        cashflowBucket: row.cashflow_bucket,
+        cashflowBucketLabel: nextBucketLabel,
+        signedAmount: parseNumber(row.signed_amount_eur),
+        balance: parseNumber(row.balance_eur),
+        needsReview: parseBoolean(row.needs_review),
+        isRecurring: parseBoolean(row.is_recurring),
+        isFixedCost: parseBoolean(row.is_fixed_cost),
+        confidence: parseNumber(row.confidence),
+        classificationSource: row.classification_source,
+        classificationSourceLabel: sourceLabel(row.classification_source),
+      };
+    })
     .sort((left, right) => `${left.date}-${left.rowId}`.localeCompare(`${right.date}-${right.rowId}`));
 
   const manualTransactions = loadManualTransactionsSync();
@@ -302,21 +389,33 @@ function loadTransactions(): TransactionRecord[] {
 function manualTransactionToRow(transaction: ManualTransactionRecord): TransactionRecord {
   const group = deriveGroupFromCategory(transaction.category);
   const bucket = deriveCashflowBucket(group, transaction.category);
+  const merchant = transaction.merchant || "Manual entry";
+  const description = transaction.description || transaction.merchant || "Manual entry";
+  const nextGroupLabel = groupLabel(group);
+  const nextCategoryLabel = categoryLabel(transaction.category);
+  const nextBucketLabel = bucketLabel(bucket);
   return {
     rowId: transaction.rowId,
     date: transaction.date,
     monthLabel: transaction.date.slice(0, 7),
     yearLabel: transaction.date.slice(0, 4),
     txType: transaction.transactionType || "Manual",
-    merchant: transaction.merchant || "Manual entry",
-    description: transaction.description || transaction.merchant || "Manual entry",
+    merchant,
+    displayMerchant: deriveDisplayMerchant({
+      merchant,
+      description,
+      categoryLabel: nextCategoryLabel,
+      groupLabel: nextGroupLabel,
+      cashflowBucketLabel: nextBucketLabel,
+    }),
+    description,
     group,
-    groupLabel: groupLabel(group),
+    groupLabel: nextGroupLabel,
     category: transaction.category,
-    categoryLabel: categoryLabel(transaction.category),
+    categoryLabel: nextCategoryLabel,
     subcategory: transaction.subcategory || "manual_entry",
     cashflowBucket: bucket,
-    cashflowBucketLabel: bucketLabel(bucket),
+    cashflowBucketLabel: nextBucketLabel,
     signedAmount: transaction.signedAmount,
     balance: 0,
     needsReview: false,

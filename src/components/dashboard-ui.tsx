@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useTransition } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import {
@@ -18,6 +18,7 @@ export type MetricItem = {
   label: string;
   value: string;
   note: string;
+  tone?: "neutral" | "positive" | "negative" | "accent";
 };
 
 export type TableColumn<Row> = {
@@ -29,6 +30,14 @@ export type TableColumn<Row> = {
   headerClassName?: string;
   cellClassName?: string;
   width?: CSSProperties["width"];
+  sortable?: boolean;
+  sortKey?: string;
+  sortDefaultDirection?: "asc" | "desc";
+};
+
+export type TableSortState = {
+  key: string;
+  direction: "asc" | "desc";
 };
 
 export type DetailSummaryItem = {
@@ -46,11 +55,93 @@ export type DetailView<Row extends Record<string, unknown> = Record<string, unkn
 };
 
 export const chartTooltipContentStyle = {
-  backgroundColor: "var(--card-strong)",
+  backgroundColor: "hsl(223 22% 13%)",
   borderRadius: "0px",
-  border: "1px solid var(--border)",
-  boxShadow: "var(--shadow-md)",
+  border: "1px solid hsla(var(--border-strong), 0.94)",
+  boxShadow: "0 18px 28px -24px rgba(0, 0, 0, 0.82)",
+  color: "hsl(var(--text))",
+  opacity: 1,
+  padding: "10px 12px",
+  backdropFilter: "none",
+  WebkitBackdropFilter: "none",
 } as const;
+
+type ChartTooltipValueFormatter = (
+  value: unknown,
+  name: string,
+  item: any,
+  index: number,
+) => ReactNode | [ReactNode, ReactNode];
+
+type ChartTooltipLabelFormatter = (label: unknown, payload: any[]) => ReactNode;
+
+function resolveChartTooltipLabel(
+  label: unknown,
+  payload: any[],
+  formatLabel?: ChartTooltipLabelFormatter,
+) {
+  const formatted = formatLabel ? formatLabel(label, payload) : label;
+  if (formatted !== undefined && formatted !== null && String(formatted).trim()) {
+    return formatted;
+  }
+
+  const first = payload[0];
+  return (
+    first?.payload?.categoryLabel ??
+    first?.payload?.label ??
+    first?.payload?.displayMonthLabel ??
+    first?.payload?.monthLabel ??
+    first?.name ??
+    first?.dataKey ??
+    ""
+  );
+}
+
+export function ChartTooltipContent({
+  active,
+  payload,
+  label,
+  formatLabel,
+  formatValue,
+}: {
+  active?: boolean;
+  payload?: any[];
+  label?: unknown;
+  formatLabel?: ChartTooltipLabelFormatter;
+  formatValue?: ChartTooltipValueFormatter;
+}) {
+  const visiblePayload = (payload ?? []).filter((item) => item && item.value !== undefined && item.value !== null);
+  if (!active || visiblePayload.length === 0) {
+    return null;
+  }
+
+  const tooltipLabel = resolveChartTooltipLabel(label, visiblePayload, formatLabel);
+
+  return (
+    <div className="chart-tooltip-surface" style={chartTooltipContentStyle}>
+      {tooltipLabel ? <div className="chart-tooltip-title">{tooltipLabel}</div> : null}
+      <div className="chart-tooltip-list">
+        {visiblePayload.map((item, index) => {
+          const resolvedName = String(item.name ?? item.dataKey ?? "");
+          const formatted = formatValue ? formatValue(item.value, resolvedName, item, index) : item.value;
+          const valueNode = Array.isArray(formatted) ? formatted[0] : formatted;
+          const nameNode = Array.isArray(formatted) ? formatted[1] : resolvedName;
+          const color = item.color ?? item.fill ?? item.stroke ?? item.payload?.color ?? "hsl(var(--text-muted))";
+
+          return (
+            <div key={`${item.dataKey ?? resolvedName}-${index}`} className="chart-tooltip-row">
+              <span className="chart-tooltip-series">
+                <span className="chart-tooltip-dot" style={{ backgroundColor: color }} />
+                <span>{nameNode}</span>
+              </span>
+              <span className="chart-tooltip-value">{valueNode}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 type EditableCategoryRow = {
   rowId?: string;
@@ -92,26 +183,30 @@ export function DashboardShell({
   title,
   description,
   meta,
+  hideHero = false,
   children,
 }: {
   kicker: string;
   title?: string;
   description: string;
   meta?: string;
+  hideHero?: boolean;
   children: ReactNode;
 }) {
   return (
     <main className="shell">
-      <section className="hero">
-        <div className="hero-main">
-          <div className="hero-kicker">{kicker}</div>
-          <div className="hero-copy">
-            {title ? <h1>{title}</h1> : null}
-            <p>{description}</p>
+      {hideHero ? null : (
+        <section className="hero">
+          <div className="hero-main">
+            <div className="hero-kicker">{kicker}</div>
+            <div className="hero-copy">
+              {title ? <h1>{title}</h1> : null}
+              <p>{description}</p>
+            </div>
           </div>
-        </div>
-        {meta ? <div className="hero-meta">{meta}</div> : null}
-      </section>
+          {meta ? <div className="hero-meta">{meta}</div> : null}
+        </section>
+      )}
 
       {children}
     </main>
@@ -200,9 +295,6 @@ export function FilterBar({
       </div>
 
       <div className="toolbar-clear">
-        <button type="button" className="quick-button" data-active={!filters.activeQuickLabel} onClick={clearToAllData}>
-          All data
-        </button>
         <button
           type="button"
           className="quick-button"
@@ -647,9 +739,11 @@ export function MetricGrid({ items }: { items: MetricItem[] }) {
   return (
     <section className="metrics">
       {items.map((item, idx) => (
-        <article className="metric-card" key={item.label} style={{ animationDelay: `${idx * 0.1}s` }}>
+        <article className="metric-card" data-tone={item.tone ?? "neutral"} key={item.label} style={{ animationDelay: `${idx * 0.1}s` }}>
           <div className="metric-label">{item.label}</div>
-          <div className="metric-value">{item.value}</div>
+          <div className="metric-value">
+            <MetricValueDisplay value={item.value} />
+          </div>
           <div className="metric-note">{item.note}</div>
         </article>
       ))}
@@ -670,12 +764,15 @@ export function ClickableMetricGrid({
         <button
           type="button"
           className="metric-card metric-card-button"
+          data-tone={item.tone ?? "neutral"}
           key={item.label}
           style={{ animationDelay: `${idx * 0.1}s` }}
           onClick={() => onSelect(item)}
         >
           <div className="metric-label">{item.label}</div>
-          <div className="metric-value">{item.value}</div>
+          <div className="metric-value">
+            <MetricValueDisplay value={item.value} />
+          </div>
           <div className="metric-note">{item.note}</div>
         </button>
       ))}
@@ -689,16 +786,18 @@ export function Section({
   children,
 }: {
   title: string;
-  note: string;
+  note?: string;
   children: ReactNode;
 }) {
   return (
     <section className="section">
       <div className="section-head">
         <h2>{title}</h2>
-        <span className="info-dot" title={note} aria-label={note}>
-          i
-        </span>
+        {note ? (
+          <span className="info-dot" title={note} aria-label={note}>
+            i
+          </span>
+        ) : null}
       </div>
       {children}
     </section>
@@ -708,22 +807,55 @@ export function Section({
 export function Panel({
   title,
   note,
+  actions,
+  className,
   children,
 }: {
   title: string;
-  note: string;
+  note?: string;
+  actions?: ReactNode;
+  className?: string;
   children: ReactNode;
 }) {
   return (
-    <article className="panel">
+    <article className={["panel", className ?? ""].filter(Boolean).join(" ")}>
       <div className="panel-head">
-        <h3>{title}</h3>
-        <span className="info-dot" title={note} aria-label={note}>
-          i
-        </span>
+        <div className="panel-head-main">
+          <h3>{title}</h3>
+          {note ? (
+            <span className="info-dot" title={note} aria-label={note}>
+              i
+            </span>
+          ) : null}
+        </div>
+        {actions ? <div className="panel-head-actions">{actions}</div> : null}
       </div>
       {children}
     </article>
+  );
+}
+
+function MetricValueDisplay({ value }: { value: string }) {
+  const hasLeadingPositiveSign = value.startsWith("+");
+  const normalizedValue = hasLeadingPositiveSign ? value.slice(1) : value;
+  const match = normalizedValue.match(/^([A-Z]{3})\s(.+)$/);
+
+  if (!match) {
+    return <span className="metric-number">{value}</span>;
+  }
+
+  const rawNumber = `${hasLeadingPositiveSign ? "+" : ""}${match[2]}`;
+  const parsedNumber = Number(rawNumber.replaceAll(",", ""));
+  const displayNumber =
+    Number.isFinite(parsedNumber) && Math.abs(parsedNumber) >= 10_000
+      ? `${parsedNumber > 0 ? "+" : parsedNumber < 0 ? "-" : ""}${Math.abs(parsedNumber).toLocaleString("en-US", { maximumFractionDigits: 0 })}`
+      : rawNumber;
+
+  return (
+    <span className="metric-value-shell">
+      <span className="metric-currency">{match[1]}</span>
+      <span className="metric-number">{displayNumber}</span>
+    </span>
   );
 }
 
@@ -732,24 +864,43 @@ export function DataTable<Row extends Record<string, unknown>>({
   rows,
   emptyMessage,
   density = "default",
+  onRowClick,
+  rowKey,
+  stickyHeader = false,
+  sortState,
+  onSortChange,
 }: {
   columns: Array<TableColumn<Row>>;
   rows: Row[];
   emptyMessage?: string;
   density?: "default" | "compact";
+  onRowClick?: (row: Row) => void;
+  rowKey?: keyof Row | ((row: Row, index: number) => string);
+  stickyHeader?: boolean;
+  sortState?: TableSortState | null;
+  onSortChange?: (next: TableSortState) => void;
 }) {
   if (rows.length === 0) {
     return <div className="empty">{emptyMessage ?? "No rows match the current view."}</div>;
   }
 
   return (
-    <div className="table-wrap">
-      <table className="data-table" data-density={density}>
+    <div className="table-wrap" data-sticky-header={stickyHeader ? "true" : undefined}>
+      <table className="data-table" data-density={density} data-sticky-header={stickyHeader ? "true" : undefined}>
         <thead>
           <tr>
             {columns.map((column) => (
               <th
                 key={String(column.key)}
+                aria-sort={
+                  column.sortable && sortState?.key === (column.sortKey ?? String(column.key))
+                    ? sortState.direction === "asc"
+                      ? "ascending"
+                      : "descending"
+                    : column.sortable
+                      ? "none"
+                      : undefined
+                }
                 className={[
                   column.align === "right" ? "is-right" : "",
                   column.className ?? "",
@@ -759,14 +910,57 @@ export function DataTable<Row extends Record<string, unknown>>({
                   .join(" ")}
                 style={column.width ? { width: column.width } : undefined}
               >
-                {column.label}
+                {column.sortable && onSortChange ? (
+                  <button
+                    type="button"
+                    className="table-sort-button"
+                    data-active={sortState?.key === (column.sortKey ?? String(column.key))}
+                    onClick={() =>
+                      onSortChange({
+                        key: column.sortKey ?? String(column.key),
+                        direction:
+                          sortState?.key === (column.sortKey ?? String(column.key))
+                            ? sortState.direction === "asc"
+                              ? "desc"
+                              : "asc"
+                            : (column.sortDefaultDirection ?? "asc"),
+                      })
+                    }
+                  >
+                    <span>{column.label}</span>
+                    <span className="table-sort-icon" aria-hidden="true">
+                      {sortState?.key === (column.sortKey ?? String(column.key)) ? (
+                        sortState.direction === "asc" ? (
+                          <ArrowUp size={12} />
+                        ) : (
+                          <ArrowDown size={12} />
+                        )
+                      ) : (
+                        <ArrowUpDown size={12} />
+                      )}
+                    </span>
+                  </button>
+                ) : (
+                  column.label
+                )}
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
           {rows.map((row, index) => (
-            <tr key={index}>
+            <tr
+              key={typeof rowKey === "function" ? rowKey(row, index) : rowKey ? String(row[rowKey] ?? index) : index}
+              className={onRowClick ? "is-clickable" : undefined}
+              onClick={onRowClick ? () => onRowClick(row) : undefined}
+              onKeyDown={onRowClick ? (event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onRowClick(row);
+                }
+              } : undefined}
+              tabIndex={onRowClick ? 0 : undefined}
+            >
               {columns.map((column) => {
                 const value = row[column.key];
                 return (
