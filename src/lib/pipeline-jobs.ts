@@ -86,7 +86,7 @@ type ImportRegistryEntry = {
   message?: string;
 };
 
-const ROOT = process.cwd();
+const ROOT = /*turbopackIgnore: true*/ process.cwd();
 const CONVERT_SCRIPT = resolveRuntimeScript("convert_trade_republic_statement.py");
 const CATEGORIZE_SCRIPT = resolveRuntimeScript("categorize_transactions.py");
 const TRANSACTIONS_OUTPUT = "statement_transactions.csv";

@@ -1,6 +1,7 @@
 import type { AssetClass } from "./investment-positions";
 
 export type EditableInvestmentAssetClass = Exclude<AssetClass, "bond_etf">;
+export type NormalizedInvestmentAssetClass = EditableInvestmentAssetClass | "bond_etf";
 
 export const EDITABLE_INVESTMENT_ASSET_CLASS_OPTIONS: Array<{
   value: EditableInvestmentAssetClass;
@@ -73,10 +74,13 @@ function normalizeInvestmentAssetClassToken(value: string) {
   return value.trim().toLowerCase().replace(/[\s-]+/g, "_");
 }
 
-export function normalizeInvestmentAssetClass(value?: string): EditableInvestmentAssetClass | "" {
+export function normalizeInvestmentAssetClass(value?: string): NormalizedInvestmentAssetClass | "" {
   const normalized = normalizeInvestmentAssetClassToken(value ?? "");
   if (!normalized) {
     return "";
+  }
+  if (normalized === "bond_etf" || normalized === "bond_etfs") {
+    return "bond_etf";
   }
   const resolved = INVESTMENT_ASSET_CLASS_ALIASES[normalized] ?? normalized;
   if (EDITABLE_INVESTMENT_ASSET_CLASS_SET.has(resolved as EditableInvestmentAssetClass)) {
@@ -92,6 +96,8 @@ export function investmentAssetClassLabel(value?: string, emptyLabel = "Automati
       return "Stock";
     case "bond":
       return "Bond";
+    case "bond_etf":
+      return "Bond ETF";
     case "etf":
       return "ETF";
     case "crypto":

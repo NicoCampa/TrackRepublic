@@ -32,16 +32,26 @@ const fxCache = new Map<string, Promise<number | null>>();
 const historicalSeriesCache = new Map<string, Promise<Map<string, number>>>();
 const metadataCache = new Map<string, Promise<{ country: string; industry: string; sector: string }>>();
 
+function normalizeCurrencyCode(currency: string) {
+  return currency.trim().toUpperCase();
+}
+
+function isCurrencyMinorUnit(currency: string) {
+  const trimmed = currency.trim();
+  return trimmed === "GBp" || trimmed.toUpperCase() === "GBX";
+}
+
 function normalizePrice(rawPrice: number, currency: string) {
-  if (currency === "GBp") {
+  const normalizedCurrency = normalizeCurrencyCode(currency);
+  if (isCurrencyMinorUnit(currency)) {
     return {
       price: rawPrice / 100,
-      currency: "GBP",
+      currency: normalizedCurrency,
     };
   }
   return {
     price: rawPrice,
-    currency,
+    currency: normalizedCurrency,
   };
 }
 
@@ -178,7 +188,26 @@ async function resolveBySearch(instrument: InvestmentInstrument): Promise<Partia
           const quotes = Array.isArray((result as { quotes?: unknown[] }).quotes)
             ? ((result as { quotes?: Record<string, unknown>[] }).quotes ?? [])
             : [];
-          const candidate = quotes.find((quote) => Boolean(quote.symbol)) ?? null;
+          const normalizedSymbolHint = normalizeSearchText(instrument.symbolHint ?? "");
+          const normalizedQuery = normalizeSearchText(instrument.searchQuery);
+          const normalizedInstrument = normalizeSearchText(instrument.instrument);
+          const normalizedIsin = normalizeSearchText(instrument.isin);
+          const rankedQuotes = quotes
+            .filter((quote) => Boolean(quote.symbol))
+            .map((quote) => ({
+              quote,
+              score: scoreSearchCandidate(quote, {
+                symbolHint: normalizedSymbolHint,
+                query: normalizedQuery,
+                instrument: normalizedInstrument,
+                isin: normalizedIsin,
+              }),
+            }))
+            .sort((left, right) => right.score - left.score);
+          const candidate =
+            instrument.quoteSearchMode === "strict"
+              ? rankedQuotes.find((entry) => entry.score >= 4)?.quote ?? null
+              : rankedQuotes[0]?.quote ?? null;
           if (!candidate) {
             return null;
           }
@@ -195,6 +224,62 @@ async function resolveBySearch(instrument: InvestmentInstrument): Promise<Partia
   }
 
   return searchCache.get(cacheKey) ?? Promise.resolve(null);
+}
+
+function normalizeSearchText(value: string) {
+  return value.toUpperCase().replace(/[^A-Z0-9]+/g, " ").trim();
+}
+
+function searchCandidateFields(candidate: Record<string, unknown>) {
+  return {
+    symbol: normalizeSearchText(String(candidate.symbol ?? "")),
+    shortName: normalizeSearchText(String(candidate.shortname ?? "")),
+    longName: normalizeSearchText(String(candidate.longname ?? "")),
+  };
+}
+
+function scoreSearchCandidate(
+  candidate: Record<string, unknown>,
+  target: {
+    symbolHint: string;
+    query: string;
+    instrument: string;
+    isin: string;
+  },
+) {
+  const fields = searchCandidateFields(candidate);
+  const nameFields = [fields.shortName, fields.longName].filter(Boolean);
+  let score = 0;
+
+  if (target.symbolHint && fields.symbol === target.symbolHint) {
+    score = Math.max(score, 8);
+  }
+  if (target.isin && [fields.symbol, ...nameFields].some((value) => value.includes(target.isin))) {
+    score = Math.max(score, 7);
+  }
+  if (target.query && fields.symbol === target.query) {
+    score = Math.max(score, 6);
+  }
+  if (target.query && nameFields.some((value) => value === target.query)) {
+    score = Math.max(score, 5);
+  }
+  if (
+    target.query &&
+    nameFields.some((value) => value.includes(target.query) || target.query.includes(value))
+  ) {
+    score = Math.max(score, 4);
+  }
+  if (target.instrument && nameFields.some((value) => value === target.instrument)) {
+    score = Math.max(score, 4);
+  }
+  if (
+    target.instrument &&
+    nameFields.some((value) => value.includes(target.instrument) || target.instrument.includes(value))
+  ) {
+    score = Math.max(score, 3);
+  }
+
+  return score;
 }
 
 function fallbackCountry(instrument: InvestmentInstrument): string {
@@ -348,6 +433,44 @@ function latestFxRateForDate(fxRates: Map<string, number>, date: string): number
   return latestRate;
 }
 
+async function loadHistoricalFxRates(currency: string, startDate: string, endDate: string) {
+  const normalizedCurrency = normalizeCurrencyCode(currency);
+  if (!normalizedCurrency || normalizedCurrency === "EUR") {
+    return new Map<string, number>();
+  }
+
+  const parseFxChart = async (symbol: string, invert = false) => {
+    const chart = await yahooFinance.chart(symbol, {
+      period1: addDays(startDate, -8),
+      period2: addDays(endDate, 5),
+      interval: "1d",
+    });
+    const rates = new Map<string, number>();
+    for (const quote of chart.quotes ?? []) {
+      const close = Number(quote.close ?? quote.adjclose ?? 0);
+      const date = toIsoDate(quote.date);
+      if (!date || !isFinitePrice(close)) {
+        continue;
+      }
+      rates.set(date, invert ? 1 / close : close);
+    }
+    return rates;
+  };
+
+  try {
+    const directRates = await parseFxChart(`${normalizedCurrency}EUR=X`);
+    if (directRates.size > 0) {
+      return directRates;
+    }
+  } catch {}
+
+  try {
+    return await parseFxChart(`EUR${normalizedCurrency}=X`, true);
+  } catch {
+    return new Map<string, number>();
+  }
+}
+
 async function loadHistoricalEurSeries(
   instrument: InvestmentInstrument,
   symbol: string,
@@ -366,23 +489,7 @@ async function loadHistoricalEurSeries(
             interval: "1d",
           });
           const currency = String(chart.meta.currency ?? "EUR");
-          const fxRates = new Map<string, number>();
-
-          if (currency && currency !== "EUR") {
-            const fxChart = await yahooFinance.chart(`${currency}EUR=X`, {
-              period1: addDays(startDate, -8),
-              period2: addDays(endDate, 5),
-              interval: "1d",
-            });
-            for (const quote of fxChart.quotes ?? []) {
-              const close = Number(quote.close ?? quote.adjclose ?? 0);
-              const date = toIsoDate(quote.date);
-              if (!date || !isFinitePrice(close)) {
-                continue;
-              }
-              fxRates.set(date, close);
-            }
-          }
+          const fxRates = await loadHistoricalFxRates(currency, startDate, endDate);
 
           const series = new Map<string, number>();
           for (const quote of chart.quotes ?? []) {
@@ -447,7 +554,17 @@ export async function loadHistoricalUnitEstimates(
   const instrumentMap = new Map(
     parsedTrades.map((trade) => [
       trade.instrumentKey,
-      resolveInstrument(trade.isin ? `${trade.isin} ${trade.instrument}` : trade.instrument, registry),
+      {
+        key: trade.instrumentKey,
+        isin: trade.isin,
+        instrument: trade.instrument,
+        symbolHint: trade.symbolHint,
+        searchQuery: trade.searchQuery,
+        assetClass: trade.assetClass,
+        priceScale: trade.priceScale,
+        fallbackValuation: trade.fallbackValuation,
+        quoteSearchMode: trade.quoteSearchMode,
+      } satisfies InvestmentInstrument,
     ]),
   );
   const byInstrument = new Map<string, { symbol: string; startDate: string; endDate: string }>();
@@ -535,7 +652,17 @@ export async function loadHistoricalMarketSeries(
   const instrumentMap = new Map(
     parsedTrades.map((trade) => [
       trade.instrumentKey,
-      resolveInstrument(trade.isin ? `${trade.isin} ${trade.instrument}` : trade.instrument, registry),
+      {
+        key: trade.instrumentKey,
+        isin: trade.isin,
+        instrument: trade.instrument,
+        symbolHint: trade.symbolHint,
+        searchQuery: trade.searchQuery,
+        assetClass: trade.assetClass,
+        priceScale: trade.priceScale,
+        fallbackValuation: trade.fallbackValuation,
+        quoteSearchMode: trade.quoteSearchMode,
+      } satisfies InvestmentInstrument,
     ]),
   );
 

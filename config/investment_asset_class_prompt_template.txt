@@ -8,6 +8,7 @@ Use only asset_class keys from the taxonomy below.
 asset_class keys are always in English and snake_case, even if the transaction text is in another language.
 Never invent an asset_class.
 If uncertain, return other.
+If examples from prior manual asset-class corrections are provided later in the prompt, treat them as strong precedents for similar descriptions.
 Asset class taxonomy:
 {{asset_class_taxonomy}}
 Rules:
@@ -20,14 +21,26 @@ Rules:
 - Broker names, trade verbs, and settlement wording alone are not enough to infer asset_class.
 - If the description only shows broker cash movement, settlement, savings-plan cash leg, fees, taxes, or an unclear investment reference with no identifiable instrument, return other.
 - Crypto coins, tokens, crypto ETPs, crypto ETNs, and similar crypto tracker products are crypto.
-- Bond ETFs and UCITS bond ETFs are etf.
+- Bond ETFs and UCITS bond ETFs are etf, not bond.
 - Gold-like ETC or ETP products are commodity.
 - ETC or ETP does not automatically mean commodity. Use commodity only when the exposure is commodity-like, especially gold or similar commodities.
-- Direct sovereign or corporate bonds, notes, and debentures are bond.
+- Direct sovereign or corporate bonds, notes, debentures, and similar fixed-income securities are bond.
 - Private equity, private credit, venture, ELTIF, infrastructure, and similar private-market products are private_market.
 - Single-company equities are stock.
 - Broad clues such as ETF, UCITS, iShares, Vanguard, Xtrackers, SPDR, or Amundi usually indicate etf.
 - Company names, common stock terms, ticker-like equity references, PLC, AG, NV, SA, or Inc without ETF wording usually indicate stock.
+- Direct bonds often look like issuer + coupon + maturity date, for example "Bundesrepublik Deutschland 2.10% 15/04/2029" or "Microsoft Corp 3.125% 06/15/2030".
+- Bond ETFs often contain words like bond, treasury, aggregate, government, fixed income, or corporate bond together with ETF or UCITS. Those stay etf.
+- Crypto ETN or ETP products stay crypto even if they are exchange-traded notes.
+- Gold ETC or physically backed gold ETP products are commodity, not etf.
+Examples:
+- "Buy trade Bundesrepublik Deutschland 2.10% 15/04/2029 ..." -> bond
+- "Buy trade Microsoft Corp 3.125% 06/15/2030 ..." -> bond
+- "Savings plan execution iShares Euro Government Bond UCITS ETF ..." -> etf
+- "Buy trade iShares Physical Gold ETC ..." -> commodity
+- "Buy trade Bitcoin ETN ..." -> crypto
+- "Buy trade Moonfare Private Equity ELTIF ..." -> private_market
+- "Buy trade Apple ..." -> stock
 Field hints:
 - category is the category from the first classification pass.
 - type is the raw transaction type from the statement and may be in German or another European language.

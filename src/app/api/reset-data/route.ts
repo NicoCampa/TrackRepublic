@@ -26,14 +26,14 @@ import { getRunningPipelineJob, resetPipelineState } from "@/lib/pipeline-jobs";
 export const runtime = "nodejs";
 
 const PROCESSED_OUTPUT_FILES = [
-  "statement_transactions.csv",
-  "statement_money_market_fund.csv",
-  "statement_all_rows.csv",
-  "statement_transactions_categorized.csv",
-  "statement_transactions_monthly_overview.csv",
-  "statement_transactions_yearly_overview.csv",
-  "statement_transactions_monthly_categories.csv",
-  "statement_transactions_yearly_categories.csv",
+  path.join(DATA_DIR, "statement_transactions.csv"),
+  path.join(DATA_DIR, "statement_money_market_fund.csv"),
+  path.join(DATA_DIR, "statement_all_rows.csv"),
+  path.join(DATA_DIR, "statement_transactions_categorized.csv"),
+  path.join(DATA_DIR, "statement_transactions_monthly_overview.csv"),
+  path.join(DATA_DIR, "statement_transactions_yearly_overview.csv"),
+  path.join(DATA_DIR, "statement_transactions_monthly_categories.csv"),
+  path.join(DATA_DIR, "statement_transactions_yearly_categories.csv"),
 ];
 
 function csvHeader(columns: readonly string[]) {
@@ -70,7 +70,7 @@ export async function POST() {
 
   await Promise.all([
     emptyDirectory(RAW_DIR),
-    Promise.all(PROCESSED_OUTPUT_FILES.map((fileName) => removeIfExists(path.join(DATA_DIR, fileName)))),
+    Promise.all(PROCESSED_OUTPUT_FILES.map((filePath) => removeIfExists(filePath))),
     removeIfExists(CATEGORY_CACHE_PATH),
     removeIfExists(PIPELINE_SUMMARY_PATH),
     removeIfExists(IMPORT_REGISTRY_PATH),

@@ -6,5 +6,5 @@ export function resolveRuntimeScript(scriptName: string) {
   if (RUNTIME_ROOT) {
     return path.join(RUNTIME_ROOT, "defaults", "scripts", scriptName);
   }
-  return path.join(process.cwd(), "scripts", scriptName);
+  return path.join(/*turbopackIgnore: true*/ process.cwd(), "scripts", scriptName);
 }
