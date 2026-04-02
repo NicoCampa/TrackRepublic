@@ -244,6 +244,9 @@ export type ParsedInvestmentTrade = {
   assetClass: AssetClass;
   priceScale: PriceScale;
   fallbackValuation: FallbackValuation;
+  symbolHint?: string;
+  searchQuery: string;
+  quoteSearchMode: QuoteSearchMode;
   units: number | null;
 };
 
@@ -332,7 +335,7 @@ function normalizeAssetClass(value?: string): AssetClass {
     return "gold";
   }
   if (normalized === "bond_etf") {
-    return "etf";
+    return "bond_etf";
   }
   if (
     normalized === "crypto" ||
@@ -419,7 +422,7 @@ function inferAssetClass(description: string, instrument: string): AssetClass {
       text,
     )
   ) {
-    return /ETF|UCITS|ISHARES|VANGUARD|AMUNDI/.test(text) ? "etf" : "bond";
+    return /ETF|UCITS|ISHARES|VANGUARD|AMUNDI/.test(text) ? "bond_etf" : "bond";
   }
   if (/ETF|UCITS|ISHARES|VANGUARD|AMUNDI|MULTI UNITS|MSCI|NASDAQ/.test(text)) {
     return "etf";
@@ -567,6 +570,9 @@ export function extractInvestmentTrades(
         assetClass: instrument.assetClass,
         priceScale: instrument.priceScale,
         fallbackValuation: instrument.fallbackValuation,
+        symbolHint: instrument.symbolHint,
+        searchQuery: instrument.searchQuery,
+        quoteSearchMode: instrument.quoteSearchMode,
         units: quantityMatch ? Number(quantityMatch[1]) : null,
       };
     });
@@ -588,12 +594,12 @@ export function buildQuoteUniverse(
       key: trade.instrumentKey,
       isin: trade.isin,
       instrument: trade.instrument,
-      symbolHint: resolved.symbolHint,
-      searchQuery: resolved.searchQuery || trade.instrument || trade.isin,
-      assetClass: resolved.assetClass,
-      priceScale: resolved.priceScale,
-      fallbackValuation: resolved.fallbackValuation,
-      quoteSearchMode: resolved.quoteSearchMode,
+      symbolHint: trade.symbolHint ?? resolved.symbolHint,
+      searchQuery: trade.searchQuery || resolved.searchQuery || trade.instrument || trade.isin,
+      assetClass: trade.assetClass,
+      priceScale: trade.priceScale,
+      fallbackValuation: trade.fallbackValuation,
+      quoteSearchMode: trade.quoteSearchMode,
     });
   }
 

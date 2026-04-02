@@ -104,6 +104,97 @@ FIXED_COST_CATEGORIES = {
     "telecom",
     "utilities",
 }
+
+CURATED_CATEGORY_PROMPT_EXAMPLES = [
+    {
+        "type": "Kuponzahlung",
+        "description": "Kuponzahlung Bundesrepublik Deutschland 2.10% 15/04/2029 DE000BU25018",
+        "category": "interest_dividend",
+    },
+    {
+        "type": "Zinszahlung",
+        "description": "Zinszahlung Frankreich 3.00% 25/05/2033 FR001400H7V7",
+        "category": "interest_dividend",
+    },
+    {
+        "type": "Buy trade",
+        "description": "Buy trade Bundesrepublik Deutschland 2.10% 15/04/2029 DE000BU25018",
+        "category": "investing",
+    },
+    {
+        "type": "Savings plan execution",
+        "description": "Savings plan execution iShares Euro Government Bond 1-3yr UCITS ETF IE00B14X4Q57",
+        "category": "investing",
+    },
+    {
+        "type": "Ertrag",
+        "description": "Ertrag iShares USD Treasury Bond 7-10yr UCITS ETF IE00B1FZS798",
+        "category": "interest_dividend",
+    },
+    {
+        "type": "Buy trade",
+        "description": "Buy trade iShares Physical Gold ETC IE00B4ND3602",
+        "category": "investing",
+    },
+    {
+        "type": "Buy trade",
+        "description": "Buy trade Bitcoin ETN XS2100000001",
+        "category": "crypto",
+    },
+]
+
+CURATED_ASSET_CLASS_PROMPT_EXAMPLES = [
+    {
+        "category": "investing",
+        "type": "Buy trade",
+        "description": "Buy trade Bundesrepublik Deutschland 2.10% 15/04/2029 DE000BU25018",
+        "asset_class": "bond",
+    },
+    {
+        "category": "investing",
+        "type": "Buy trade",
+        "description": "Buy trade Microsoft Corp 3.125% 06/15/2030 US594918CF95",
+        "asset_class": "bond",
+    },
+    {
+        "category": "investing",
+        "type": "Savings plan execution",
+        "description": "Savings plan execution iShares Euro Government Bond 1-3yr UCITS ETF IE00B14X4Q57",
+        "asset_class": "etf",
+    },
+    {
+        "category": "investing",
+        "type": "Buy trade",
+        "description": "Buy trade Xtrackers II Global Government Bond UCITS ETF 1C LU0908508731",
+        "asset_class": "etf",
+    },
+    {
+        "category": "investing",
+        "type": "Buy trade",
+        "description": "Buy trade iShares Physical Gold ETC IE00B4ND3602",
+        "asset_class": "commodity",
+    },
+    {
+        "category": "investing",
+        "type": "Buy trade",
+        "description": "Buy trade Bitcoin ETN XS2100000001",
+        "asset_class": "crypto",
+    },
+    {
+        "category": "investing",
+        "type": "Buy trade",
+        "description": "Buy trade Moonfare Private Equity ELTIF",
+        "asset_class": "private_market",
+    },
+    {
+        "category": "investing",
+        "type": "Buy trade",
+        "description": "Buy trade Apple US0378331005",
+        "asset_class": "stock",
+    },
+]
+
+
 def english_output_name(value: str) -> str:
     translated = value
     translated = re.sub(r"(?i)kontoauszug", "statement", translated)
@@ -543,13 +634,13 @@ def normalize_cached_classification(raw: dict) -> dict:
     }
 
 
-def build_prompt_examples(
+def build_category_prompt_examples(
     manual_rules: list[ManualRule],
     row_overrides: dict[str, RowOverride],
     limit: int = 12,
 ) -> list[dict[str, str]]:
     examples: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
 
     def add_example(tx_type: Optional[str], sign: Optional[str], description: Optional[str], category: Optional[str]) -> None:
         normalized_category = normalize_category(category) or "other"
@@ -577,6 +668,11 @@ def build_prompt_examples(
             example["type"] = normalized_type
         examples.append(example)
 
+    for example in CURATED_CATEGORY_PROMPT_EXAMPLES:
+        add_example(example.get("type"), None, example.get("description"), example.get("category"))
+        if len(examples) >= limit:
+            return examples[:limit]
+
     for override in row_overrides.values():
         add_example(override.transaction_type, override.amount_sign, override.description, override.category)
         if len(examples) >= limit:
@@ -586,6 +682,68 @@ def build_prompt_examples(
         if rule.match_type == "regex":
             continue
         add_example(rule.transaction_type, rule.amount_sign, rule.pattern, rule.category)
+        if len(examples) >= limit:
+            return examples[:limit]
+
+    return examples[:limit]
+
+
+def build_asset_class_prompt_examples(
+    row_overrides: dict[str, RowOverride],
+    limit: int = 12,
+) -> list[dict[str, str]]:
+    examples: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+
+    def add_example(
+        category: Optional[str],
+        tx_type: Optional[str],
+        description: Optional[str],
+        asset_class: Optional[str],
+    ) -> None:
+        normalized_description = clean_optional_text(description)
+        normalized_asset_class = normalize_asset_class(asset_class)
+        normalized_category = normalize_category(category)
+        normalized_type = clean_optional_text(tx_type) or ""
+        if not normalized_description or normalized_asset_class == "other":
+            return
+        if normalized_category not in {"investing", "crypto"}:
+            normalized_category = "crypto" if normalized_asset_class == "crypto" else "investing"
+        dedupe_key = (
+            normalized_category,
+            normalized_type,
+            normalize_description_for_classification(normalized_description),
+            normalized_asset_class,
+        )
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        example = {
+            "category": normalized_category,
+            "description": normalized_description,
+            "asset_class": normalized_asset_class,
+        }
+        if normalized_type:
+            example["type"] = normalized_type
+        examples.append(example)
+
+    for example in CURATED_ASSET_CLASS_PROMPT_EXAMPLES:
+        add_example(
+            example.get("category"),
+            example.get("type"),
+            example.get("description"),
+            example.get("asset_class"),
+        )
+        if len(examples) >= limit:
+            return examples[:limit]
+
+    for override in row_overrides.values():
+        add_example(
+            override.category,
+            override.transaction_type,
+            override.description,
+            override.asset_class,
+        )
         if len(examples) >= limit:
             return examples[:limit]
 
@@ -616,6 +774,7 @@ def build_prompt_fingerprint(
     prompt_addendum: str,
     account_holder_name: str,
     prompt_examples: list[dict[str, str]],
+    asset_class_prompt_examples: list[dict[str, str]],
 ) -> str:
     payload = {
         "classifier_mode": "llm_only_v4_two_step_asset_class",
@@ -624,6 +783,7 @@ def build_prompt_fingerprint(
         "addendum": prompt_addendum.strip(),
         "account_holder_name": re.sub(r"\s+", " ", account_holder_name).strip(),
         "examples": prompt_examples,
+        "asset_class_examples": asset_class_prompt_examples,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -750,7 +910,7 @@ def build_category_prompt(
     )
     prompt_examples = prompt_examples or []
     examples_block = (
-        "Examples from prior manual corrections and rules:\n"
+        "Examples from curated precedents, prior manual corrections, and rules:\n"
         f"{json.dumps(prompt_examples, ensure_ascii=False)}\n"
         if prompt_examples
         else ""
@@ -768,6 +928,7 @@ def build_asset_class_prompt(
     items: list[ClassificationItem],
     prompt_addendum: str = "",
     asset_class_prompt_template: str = "",
+    prompt_examples: Optional[list[dict[str, str]]] = None,
 ) -> str:
     example_shape = {
         "results": [
@@ -803,6 +964,15 @@ def build_asset_class_prompt(
         },
     )
     parts = [static_prompt]
+    prompt_examples = prompt_examples or []
+    examples_block = (
+        "Examples from prior manual asset-class corrections and curated precedents:\n"
+        f"{json.dumps(prompt_examples, ensure_ascii=False)}\n"
+        if prompt_examples
+        else ""
+    )
+    if examples_block:
+        parts.append(examples_block.strip())
     if extra_block:
         parts.append(extra_block.strip())
     parts.append(f"Investment transactions:\n{json.dumps(payload, ensure_ascii=False)}")
@@ -875,6 +1045,7 @@ def call_asset_class_llm_batch(
     items: list[ClassificationItem],
     prompt_addendum: str = "",
     asset_class_prompt_template: str = "",
+    prompt_examples: Optional[list[dict[str, str]]] = None,
 ) -> dict[str, dict]:
     response_schema = {
         "type": "object",
@@ -899,6 +1070,7 @@ def call_asset_class_llm_batch(
         items,
         prompt_addendum=prompt_addendum,
         asset_class_prompt_template=asset_class_prompt_template,
+        prompt_examples=prompt_examples,
     )
     content = ollama_chat(model=model, prompt=prompt, response_schema=response_schema, timeout_seconds=240)
     parsed = json.loads(content)
@@ -982,6 +1154,7 @@ def classify_asset_classes_with_llm(
     items: list[ClassificationItem],
     prompt_addendum: str = "",
     asset_class_prompt_template: str = "",
+    prompt_examples: Optional[list[dict[str, str]]] = None,
 ) -> dict[str, dict]:
     if not items:
         return {}
@@ -992,6 +1165,7 @@ def classify_asset_classes_with_llm(
             items=items,
             prompt_addendum=prompt_addendum,
             asset_class_prompt_template=asset_class_prompt_template,
+            prompt_examples=prompt_examples,
         )
     except (json.JSONDecodeError, urllib.error.URLError, TimeoutError, ValueError):
         if len(items) == 1:
@@ -1008,12 +1182,14 @@ def classify_asset_classes_with_llm(
             items=items[:middle],
             prompt_addendum=prompt_addendum,
             asset_class_prompt_template=asset_class_prompt_template,
+            prompt_examples=prompt_examples,
         )
         right = classify_asset_classes_with_llm(
             model=model,
             items=items[middle:],
             prompt_addendum=prompt_addendum,
             asset_class_prompt_template=asset_class_prompt_template,
+            prompt_examples=prompt_examples,
         )
         return {**left, **right}
 
@@ -1318,13 +1494,15 @@ def main() -> None:
     asset_class_prompt_template = DEFAULT_ASSET_CLASS_PROMPT_TEMPLATE
     prompt_addendum = load_prompt_addendum(args.prompt_addendum_file)
     account_holder_name = re.sub(r"\s+", " ", args.user_name).strip()
-    prompt_examples = build_prompt_examples(manual_rules, row_overrides)
+    prompt_examples = build_category_prompt_examples(manual_rules, row_overrides)
+    asset_class_prompt_examples = build_asset_class_prompt_examples(row_overrides)
     prompt_fingerprint = build_prompt_fingerprint(
         prompt_template=prompt_template,
         asset_class_prompt_template=asset_class_prompt_template,
         prompt_addendum=prompt_addendum,
         account_holder_name=account_holder_name,
         prompt_examples=prompt_examples,
+        asset_class_prompt_examples=asset_class_prompt_examples,
     )
     if row_overrides_path is not None:
         if row_overrides:
@@ -1332,7 +1510,15 @@ def main() -> None:
         else:
             print(f"No row overrides loaded from {row_overrides_path}.", file=sys.stderr)
     if prompt_examples:
-        print(f"Loaded {len(prompt_examples)} prompt examples from manual corrections and rules.", file=sys.stderr)
+        print(
+            f"Loaded {len(prompt_examples)} category prompt examples from curated, manual, and rule precedents.",
+            file=sys.stderr,
+        )
+    if asset_class_prompt_examples:
+        print(
+            f"Loaded {len(asset_class_prompt_examples)} asset-class prompt examples from curated and manual corrections.",
+            file=sys.stderr,
+        )
 
     existing_cache_entries = {
         key: normalize_cached_classification(value if isinstance(value, dict) else {})
@@ -1424,6 +1610,7 @@ def main() -> None:
                     items=batch,
                     prompt_addendum=prompt_addendum,
                     asset_class_prompt_template=asset_class_prompt_template,
+                    prompt_examples=asset_class_prompt_examples,
                 )
                 for cache_key, asset_classification in batch_results.items():
                     current = dict(classification_by_key.get(cache_key) or {})

@@ -5,10 +5,9 @@ import { parse } from "csv-parse/sync";
 import { normalizeCategoryKey } from "./category-config";
 import { normalizeInvestmentAssetClass } from "./investment-asset-class";
 
-const ROOT = process.cwd();
-export const CONFIG_DIR = path.join(ROOT, "config");
-export const DATA_DIR = path.join(ROOT, "data", "processed");
-export const RAW_DIR = path.join(ROOT, "data", "raw");
+export const CONFIG_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), "config");
+export const DATA_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "processed");
+export const RAW_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "raw");
 
 export const MANUAL_RULES_PATH = path.join(CONFIG_DIR, "manual_category_rules.csv");
 export const ROW_OVERRIDES_PATH = path.join(CONFIG_DIR, "transaction_overrides.csv");

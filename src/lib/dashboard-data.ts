@@ -43,8 +43,7 @@ import type {
 } from "./investment-positions";
 import { matchesManualRule } from "./rule-matching";
 
-const ROOT = process.cwd();
-const DATA_DIR = path.join(ROOT, "data", "processed");
+const DATA_DIR = path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "processed");
 const CATEGORIZED_CSV = "statement_transactions_categorized.csv";
 const CASH_CSV = "statement_transactions.csv";
 const FUND_CSV = "statement_money_market_fund.csv";
