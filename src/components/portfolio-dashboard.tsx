@@ -33,7 +33,11 @@ import type {
   PortfolioReturnPoint,
   PositionPerformanceRecord,
 } from "@/lib/investment-performance";
-import { buildInvestmentAnalytics, historicalPriceOnOrBefore } from "@/lib/investment-performance";
+import {
+  buildInvestmentAnalytics,
+  buildModifiedDietzReturnSummary,
+  historicalPriceOnOrBefore,
+} from "@/lib/investment-performance";
 import { extractInvestmentTrades, resolveInstrument } from "@/lib/investment-positions";
 import type { DetailTrendView, DetailView, TableColumn, TableSortState } from "./dashboard-ui";
 import {
@@ -149,30 +153,30 @@ function formatPercent(value: number) {
   return `${value.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
 }
 
-function compoundReturns(values: Array<number | null | undefined>) {
-  let factor = 1;
-  let hasValue = false;
-  for (const value of values) {
-    if (typeof value !== "number" || !Number.isFinite(value)) {
-      continue;
-    }
-    factor *= 1 + value / 100;
-    hasValue = true;
-  }
-  return hasValue ? (factor - 1) * 100 : null;
+function laterDate(left: string, right: string) {
+  return left > right ? left : right;
+}
+
+function earlierDate(left: string, right: string) {
+  return left < right ? left : right;
+}
+
+function startOfPortfolioPeriod(periodKey: string, granularity: PortfolioTrendGranularity) {
+  return granularity === "year" ? `${periodKey}-01-01` : `${periodKey}-01`;
 }
 
 function buildPortfolioPeriodReturnMap(
   returnSeries: PortfolioReturnPoint[],
+  rows: PortfolioTrendRow[],
   granularity: PortfolioTrendGranularity,
+  filters: FilterState,
 ) {
-  const byPeriod = new Map<string, Array<number | null>>();
-  for (const point of returnSeries) {
-    const periodKey = granularity === "year" ? point.date.slice(0, 4) : point.date.slice(0, 7);
-    byPeriod.set(periodKey, [...(byPeriod.get(periodKey) ?? []), point.dailyReturnPct ?? null]);
-  }
   return new Map(
-    [...byPeriod.entries()].map(([periodKey, values]) => [periodKey, compoundReturns(values)]),
+    rows.map((row) => {
+      const startDate = laterDate(startOfPortfolioPeriod(row.periodKey, granularity), filters.startDate);
+      const endDate = earlierDate(row.date, filters.endDate);
+      return [row.periodKey, buildModifiedDietzReturnSummary(returnSeries, startDate, endDate).returnPct] as const;
+    }),
   );
 }
 
@@ -181,33 +185,7 @@ function buildPortfolioRangeReturnSummary(
   startDate: string,
   endDate: string,
 ) {
-  const points = returnSeries.filter((point) => point.date >= startDate && point.date <= endDate);
-  if (points.length === 0) {
-    return {
-      returnPct: null,
-      returnEur: null,
-    };
-  }
-
-  let previousPoint: PortfolioReturnPoint | null = null;
-  for (const point of returnSeries) {
-    if (point.date >= startDate) {
-      break;
-    }
-    previousPoint = point;
-  }
-
-  const returnPct = compoundReturns(points.map((point) => point.dailyReturnPct));
-  const endPoint = points.at(-1) ?? null;
-  const externalFlowEur = points.reduce((sum, point) => sum + point.externalFlowEur, 0);
-
-  return {
-    returnPct,
-    returnEur:
-      previousPoint && endPoint
-        ? endPoint.totalValueEur - previousPoint.totalValueEur - externalFlowEur
-        : null,
-  };
+  return buildModifiedDietzReturnSummary(returnSeries, startDate, endDate, { allowInitialZeroStart: true });
 }
 
 function comparePortfolioValues(left: unknown, right: unknown) {
@@ -549,12 +527,12 @@ export function PortfolioDashboard({ data }: { data: AccountsData }) {
 
   const { monthlyRows, yearlyRows } = useMemo(() => buildPortfolioHistoryRows(analytics.history, filters), [analytics.history, filters]);
   const monthlyReturnMap = useMemo(
-    () => buildPortfolioPeriodReturnMap(analytics.returnSeries, "month"),
-    [analytics.returnSeries],
+    () => buildPortfolioPeriodReturnMap(analytics.returnSeries, monthlyRows, "month", filters),
+    [analytics.returnSeries, filters, monthlyRows],
   );
   const yearlyReturnMap = useMemo(
-    () => buildPortfolioPeriodReturnMap(analytics.returnSeries, "year"),
-    [analytics.returnSeries],
+    () => buildPortfolioPeriodReturnMap(analytics.returnSeries, yearlyRows, "year", filters),
+    [analytics.returnSeries, filters, yearlyRows],
   );
   const monthlyTrendRows = useMemo(
     () =>

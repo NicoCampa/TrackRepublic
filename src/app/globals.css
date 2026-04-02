@@ -4817,14 +4817,18 @@ select {
   height: min(74dvh, 760px);
 }
 
-.category-editor-sheet-head p {
-  max-width: 48ch;
+.category-editor-sheet-head {
+  padding-bottom: 10px;
+}
+
+.category-editor-sheet-head .detail-sheet-kicker {
+  margin-bottom: 0;
 }
 
 .category-editor-sheet-body {
-  overflow: hidden;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
   gap: 14px;
 }
 
@@ -4905,9 +4909,7 @@ select {
 }
 
 .category-editor-selector {
-  min-height: 0;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -4940,11 +4942,8 @@ select {
 }
 
 .category-editor-sheet-groups {
-  min-height: 0;
-  overflow: auto;
   display: grid;
   gap: 14px;
-  padding-right: 4px;
 }
 
 .category-editor-sheet-group {
@@ -5105,17 +5104,17 @@ select {
 
 .investment-asset-class-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
 }
 
 .investment-asset-class-option {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
+  display: grid;
+  align-content: start;
+  gap: 10px;
   width: 100%;
-  padding: 12px;
+  min-height: 112px;
+  padding: 12px 13px;
   border: 1px solid hsla(var(--border), 0.56);
   border-radius: 0px;
   background: hsla(var(--text), 0.02);
@@ -5153,24 +5152,20 @@ select {
 
 .investment-asset-class-option-copy {
   display: grid;
-  gap: 8px;
+  align-content: start;
+  gap: 9px;
   min-width: 0;
+}
+
+.investment-asset-class-option .investment-asset-class-badge {
+  justify-self: start;
+  max-width: 100%;
 }
 
 .investment-asset-class-option-copy small {
   color: hsl(var(--text-muted));
   font-size: 12px;
   line-height: 1.45;
-}
-
-.investment-asset-class-option-meta {
-  flex: 0 0 auto;
-  color: hsl(var(--text-muted));
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  white-space: nowrap;
 }
 
 .category-editor-sheet-empty {
@@ -5194,6 +5189,7 @@ select {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+  margin-top: auto;
   padding-top: 2px;
   border-top: 1px solid hsla(var(--border), 0.72);
 }

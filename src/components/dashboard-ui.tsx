@@ -515,7 +515,6 @@ export function CategoryEditor({ row }: { row: Record<string, unknown> }) {
   const editableRow = isEditableCategoryRow(row) ? row : null;
   const router = useRouter();
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const dialogTitleId = useId();
   const searchFieldId = useId();
   const [isOpen, setIsOpen] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState(editableRow?.categoryKey ?? "other");
@@ -680,14 +679,12 @@ export function CategoryEditor({ row }: { row: Record<string, unknown> }) {
             className="detail-sheet category-editor-sheet"
             role="dialog"
             aria-modal="true"
-            aria-labelledby={dialogTitleId}
+            aria-label="Edit classification"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="detail-sheet-head category-editor-sheet-head">
               <div>
                 <div className="detail-sheet-kicker">Transactions</div>
-                <h2 id={dialogTitleId}>Edit classification</h2>
-                <p>Update this transaction only. Similar rows, rules, and future imports stay unchanged.</p>
               </div>
               <div className="detail-sheet-head-actions">
                 <button
@@ -830,19 +827,11 @@ export function CategoryEditor({ row }: { row: Record<string, unknown> }) {
                       onClick={() => setSelectedAssetClass("")}
                       disabled={isSaving}
                       aria-pressed={selectedAssetClass === ""}
+                      aria-label={`Automatic${currentAssetClassOverride === "" ? ", current" : selectedAssetClass === "" ? ", selected" : ""}`}
                     >
                       <span className="investment-asset-class-option-copy">
                         <InvestmentAssetClassBadge automatic />
-                        <small>{currentAssetClass ? `Follow ${currentAssetClassLabel}` : "Remove the manual subtype override."}</small>
-                      </span>
-                      <span className="investment-asset-class-option-meta">
-                        {isSaving && selectedAssetClass === ""
-                          ? "Saving..."
-                          : currentAssetClassOverride === ""
-                            ? "Saved"
-                            : selectedAssetClass === ""
-                              ? "Selected"
-                              : "Choose"}
+                        <small>{currentAssetClass ? `Follow ${currentAssetClassLabel}` : "Use the automatic classifier result."}</small>
                       </span>
                     </button>
 
@@ -861,21 +850,11 @@ export function CategoryEditor({ row }: { row: Record<string, unknown> }) {
                           onClick={() => setSelectedAssetClass(option.value)}
                           disabled={isSaving}
                           aria-pressed={isSelected}
+                          aria-label={`${option.label}${isSaved ? ", current" : isSelected ? ", selected" : isCurrent ? ", automatic result" : ""}`}
                         >
                           <span className="investment-asset-class-option-copy">
                             <InvestmentAssetClassBadge value={option.value} label={option.label} />
                             <small>{option.note}</small>
-                          </span>
-                          <span className="investment-asset-class-option-meta">
-                            {isSaving && isSelected
-                              ? "Saving..."
-                              : isSaved
-                                ? "Saved"
-                                : isCurrent
-                                  ? "Current"
-                                  : isSelected
-                                    ? "Selected"
-                                    : "Choose"}
                           </span>
                         </button>
                       );

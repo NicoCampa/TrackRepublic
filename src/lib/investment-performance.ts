@@ -69,7 +69,11 @@ export type PortfolioReturnPoint = {
   cashValueEur: number;
   totalValueEur: number;
   externalFlowEur: number;
-  dailyReturnPct: number | null;
+};
+
+export type PortfolioReturnSummary = {
+  returnPct: number | null;
+  returnEur: number | null;
 };
 
 export type InvestmentAnalytics = {
@@ -458,6 +462,11 @@ function previousDate(date: string) {
   return current.toISOString().slice(0, 10);
 }
 
+function utcDayNumber(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+  return Math.floor(Date.UTC(year ?? 0, (month ?? 1) - 1, day ?? 1) / 86_400_000);
+}
+
 function isExternalPortfolioFlow(row: TransactionRecord) {
   if (row.group === "investment") {
     return false;
@@ -477,6 +486,70 @@ function buildExternalFlowByDate(transactions: TransactionRecord[], endDate: str
     byDate.set(row.date, (byDate.get(row.date) ?? 0) + row.signedAmount);
   }
   return byDate;
+}
+
+export function buildModifiedDietzReturnSummary(
+  returnSeries: PortfolioReturnPoint[],
+  startDate: string,
+  endDate: string,
+  options?: { allowInitialZeroStart?: boolean },
+): PortfolioReturnSummary {
+  if (!startDate || !endDate || startDate > endDate) {
+    return {
+      returnPct: null,
+      returnEur: null,
+    };
+  }
+
+  let previousPoint: PortfolioReturnPoint | null = null;
+  const periodPoints: PortfolioReturnPoint[] = [];
+  for (const point of returnSeries) {
+    if (point.date < startDate) {
+      previousPoint = point;
+      continue;
+    }
+    if (point.date > endDate) {
+      break;
+    }
+    periodPoints.push(point);
+  }
+
+  if (!previousPoint && options?.allowInitialZeroStart && periodPoints.length > 0) {
+    previousPoint = {
+      date: previousDate(periodPoints[0]?.date ?? startDate),
+      marketValueEur: 0,
+      cashValueEur: 0,
+      totalValueEur: 0,
+      externalFlowEur: 0,
+    };
+  }
+
+  const endPoint = periodPoints.at(-1) ?? null;
+  if (!previousPoint || !endPoint) {
+    return {
+      returnPct: null,
+      returnEur: null,
+    };
+  }
+
+  const externalFlowEur = periodPoints.reduce((sum, point) => sum + point.externalFlowEur, 0);
+  const returnEur = endPoint.totalValueEur - previousPoint.totalValueEur - externalFlowEur;
+  const totalDays = Math.max(1, utcDayNumber(endPoint.date) - utcDayNumber(previousPoint.date));
+  const weightedExternalFlowEur = periodPoints.reduce((sum, point) => {
+    const remainingDays = Math.max(0, utcDayNumber(endPoint.date) - utcDayNumber(point.date));
+    return sum + point.externalFlowEur * (remainingDays / totalDays);
+  }, 0);
+  const denominator = previousPoint.totalValueEur + weightedExternalFlowEur;
+
+  return {
+    returnPct:
+      Math.abs(denominator) > 0.0000001
+        ? (returnEur / denominator) * 100
+        : Math.abs(returnEur) <= 0.0000001
+          ? 0
+          : null,
+    returnEur,
+  };
 }
 
 function buildHistoricalPortfolioPoint(params: {
@@ -682,12 +755,7 @@ export function buildInvestmentAnalytics(params: {
       if (!point) {
         return null;
       }
-      const previousPoint = index > 0 ? timelineByDate.get(returnDates[index - 1]) ?? null : null;
       const externalFlowEur = externalFlowByDate.get(date) ?? 0;
-      const dailyReturnPct =
-        previousPoint && Math.abs(previousPoint.totalValueEur) > 0.0000001
-          ? ((point.totalValueEur - previousPoint.totalValueEur - externalFlowEur) / previousPoint.totalValueEur) * 100
-          : null;
 
       return {
         date,
@@ -695,7 +763,6 @@ export function buildInvestmentAnalytics(params: {
         cashValueEur: point.cashValueEur,
         totalValueEur: point.totalValueEur,
         externalFlowEur,
-        dailyReturnPct,
       } satisfies PortfolioReturnPoint;
     })
     .filter((point): point is PortfolioReturnPoint => Boolean(point));
