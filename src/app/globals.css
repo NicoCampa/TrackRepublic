@@ -5378,12 +5378,23 @@ select {
 .position-holding-popover {
   position: absolute;
   z-index: 1200;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
   padding: 12px;
+  overflow: hidden;
   background: hsl(223 22% 13%);
   border: 1px solid hsla(var(--border-strong), 0.94);
   box-shadow: 0 18px 28px -24px rgba(0, 0, 0, 0.82);
+}
+
+.position-holding-body {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding-right: 2px;
 }
 
 .position-holding-form {
@@ -5429,6 +5440,9 @@ select {
   display: flex;
   justify-content: flex-end;
   gap: 6px;
+  margin-top: auto;
+  padding-top: 2px;
+  border-top: 1px solid hsla(var(--border), 0.72);
 }
 
 .category-editor-trigger {

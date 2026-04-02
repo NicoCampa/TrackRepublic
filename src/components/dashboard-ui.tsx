@@ -1136,54 +1136,56 @@ export function PositionHoldingEditor({ row }: { row: Record<string, unknown> })
                 <span>{sourceLabel}</span>
               </div>
             </div>
-            <div className="position-holding-form">
-              <label className="position-holding-field">
-                <span>Effective date</span>
-                <input
-                  className="position-units-input"
-                  type="date"
-                  value={draftEffectiveDate}
-                  onChange={(event) => setDraftEffectiveDate(event.target.value)}
-                />
-              </label>
-              <label className="position-holding-field">
-                <span>Units</span>
-                <input
-                  className="position-units-input"
-                  type="number"
-                  step="0.000001"
-                  min="0"
-                  value={draftUnits}
-                  onChange={(event) => {
-                    setDraftUnits(event.target.value);
-                    if (error) {
-                      setError("");
-                    }
-                  }}
-                  placeholder="0.000000"
-                />
-              </label>
-              <label className="position-holding-field">
-                <span>{priceLabel}</span>
-                <input
-                  className="position-units-input"
-                  type="number"
-                  step={row.priceScale === "percent_of_par" ? "0.0001" : "0.000001"}
-                  min="0"
-                  value={draftPrice}
-                  onChange={(event) => {
-                    setDraftPrice(event.target.value);
-                    if (error) {
-                      setError("");
-                    }
-                  }}
-                />
-              </label>
+            <div className="position-holding-body">
+              <div className="position-holding-form">
+                <label className="position-holding-field">
+                  <span>Effective date</span>
+                  <input
+                    className="position-units-input"
+                    type="date"
+                    value={draftEffectiveDate}
+                    onChange={(event) => setDraftEffectiveDate(event.target.value)}
+                  />
+                </label>
+                <label className="position-holding-field">
+                  <span>Units</span>
+                  <input
+                    className="position-units-input"
+                    type="number"
+                    step="0.000001"
+                    min="0"
+                    value={draftUnits}
+                    onChange={(event) => {
+                      setDraftUnits(event.target.value);
+                      if (error) {
+                        setError("");
+                      }
+                    }}
+                    placeholder="0.000000"
+                  />
+                </label>
+                <label className="position-holding-field">
+                  <span>{priceLabel}</span>
+                  <input
+                    className="position-units-input"
+                    type="number"
+                    step={row.priceScale === "percent_of_par" ? "0.0001" : "0.000001"}
+                    min="0"
+                    value={draftPrice}
+                    onChange={(event) => {
+                      setDraftPrice(event.target.value);
+                      if (error) {
+                        setError("");
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+              <div className="position-holding-helper">
+                Live quotes still take priority. Manual price is used when no valid live quote is available.
+              </div>
+              {error ? <span className="table-action-error">{error}</span> : null}
             </div>
-            <div className="position-holding-helper">
-              Live quotes still take priority. Manual price is used when no valid live quote is available.
-            </div>
-            {error ? <span className="table-action-error">{error}</span> : null}
             <div className="position-units-actions">
               <button type="button" className="table-action-button table-action-button-secondary" onClick={() => setIsOpen(false)} disabled={isSaving}>
                 Close
