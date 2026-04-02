@@ -2,7 +2,7 @@
 name = "cashflow_tracker_desktop"
 version = "1.0.0"
 description = "Desktop shell for the Track Republic Next.js app"
-authors = ["Nicolo Campagnoli"]
+authors = ["Track Republic"]
 license = "UNLICENSED"
 repository = ""
 edition = "2021"

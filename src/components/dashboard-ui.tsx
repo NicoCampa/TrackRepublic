@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useId, useMemo, useRef, useState, useTransition } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { ArrowDown, ArrowUp, ArrowUpDown, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
   buildQuickMonthRanges,
   buildQuickYearRanges,
@@ -12,7 +13,13 @@ import {
   formatEuro,
   type FilterState,
 } from "@/lib/dashboard-utils";
-import { buildCategoryOptionGroupsForAmount, categoryLabel, CATEGORY_THEME } from "@/lib/category-config";
+import { buildCategoryOptionGroupsForAmount, categoryLabel, resolveCategoryTheme, type CategoryTheme } from "@/lib/category-config";
+import {
+  EDITABLE_INVESTMENT_ASSET_CLASS_OPTIONS,
+  investmentAssetClassLabel,
+  normalizeInvestmentAssetClass,
+} from "@/lib/investment-asset-class";
+import type { PriceScale } from "@/lib/investment-positions";
 
 export type MetricItem = {
   label: string;
@@ -45,10 +52,27 @@ export type DetailSummaryItem = {
   value: string;
 };
 
+export type DetailTrendPoint = {
+  monthLabel: string;
+  displayMonthLabel: string;
+  value: number;
+};
+
+export type DetailTrendView = {
+  title: string;
+  note?: string;
+  valueLabel: string;
+  color?: string;
+  data: DetailTrendPoint[];
+};
+
 export type DetailView<Row extends Record<string, unknown> = Record<string, unknown>> = {
   title: string;
   meta?: string;
   summary?: DetailSummaryItem[];
+  trend?: DetailTrendView;
+  actionHref?: string;
+  actionLabel?: string;
   rows: Row[];
   columns: Array<TableColumn<Row>>;
   emptyMessage?: string;
@@ -65,6 +89,34 @@ export const chartTooltipContentStyle = {
   backdropFilter: "none",
   WebkitBackdropFilter: "none",
 } as const;
+
+const detailTrendAxisFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "EUR",
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+const detailTableSortCollator = new Intl.Collator("en", {
+  sensitivity: "base",
+  numeric: true,
+});
+
+function compareDetailTableValues(left: unknown, right: unknown) {
+  if (left == null && right == null) {
+    return 0;
+  }
+  if (left == null) {
+    return 1;
+  }
+  if (right == null) {
+    return -1;
+  }
+  if (typeof left === "number" && typeof right === "number") {
+    return left - right;
+  }
+  return detailTableSortCollator.compare(String(left), String(right));
+}
 
 type ChartTooltipValueFormatter = (
   value: unknown,
@@ -103,25 +155,28 @@ export function ChartTooltipContent({
   label,
   formatLabel,
   formatValue,
+  sortPayload,
 }: {
   active?: boolean;
   payload?: any[];
   label?: unknown;
   formatLabel?: ChartTooltipLabelFormatter;
   formatValue?: ChartTooltipValueFormatter;
+  sortPayload?: ((left: any, right: any) => number) | undefined;
 }) {
   const visiblePayload = (payload ?? []).filter((item) => item && item.value !== undefined && item.value !== null);
   if (!active || visiblePayload.length === 0) {
     return null;
   }
 
-  const tooltipLabel = resolveChartTooltipLabel(label, visiblePayload, formatLabel);
+  const sortedPayload = sortPayload ? visiblePayload.slice().sort(sortPayload) : visiblePayload;
+  const tooltipLabel = resolveChartTooltipLabel(label, sortedPayload, formatLabel);
 
   return (
     <div className="chart-tooltip-surface" style={chartTooltipContentStyle}>
       {tooltipLabel ? <div className="chart-tooltip-title">{tooltipLabel}</div> : null}
       <div className="chart-tooltip-list">
-        {visiblePayload.map((item, index) => {
+        {sortedPayload.map((item, index) => {
           const resolvedName = String(item.name ?? item.dataKey ?? "");
           const formatted = formatValue ? formatValue(item.value, resolvedName, item, index) : item.value;
           const valueNode = Array.isArray(formatted) ? formatted[0] : formatted;
@@ -147,10 +202,16 @@ type EditableCategoryRow = {
   rowId?: string;
   txType?: string;
   description?: string;
-  merchant?: string;
+  displayDescription?: string;
+  date?: string;
   signedAmount?: number;
+  groupKey?: string;
   categoryKey?: string;
   categoryLabel?: string;
+  categoryOverride?: string;
+  investmentAssetClass?: string;
+  classifiedInvestmentAssetClass?: string;
+  investmentAssetClassOverride?: string;
 };
 
 type EditablePositionRow = {
@@ -158,7 +219,12 @@ type EditablePositionRow = {
   isin?: string;
   instrument: string;
   units: number;
+  unitsKnown?: boolean;
   effectiveDate: string;
+  priceEur: number;
+  priceScale?: PriceScale;
+  valuationSource?: string;
+  valuationSourceLabel?: string;
 };
 
 export function defaultFilterState(dates: string[]): FilterState {
@@ -183,18 +249,22 @@ export function DashboardShell({
   title,
   description,
   meta,
+  className,
   hideHero = false,
+  viewportLocked = false,
   children,
 }: {
   kicker: string;
   title?: string;
   description: string;
   meta?: string;
+  className?: string;
   hideHero?: boolean;
+  viewportLocked?: boolean;
   children: ReactNode;
 }) {
   return (
-    <main className="shell">
+    <main className={`shell${viewportLocked ? " shell-viewport-locked" : ""}${className ? ` ${className}` : ""}`}>
       {hideHero ? null : (
         <section className="hero">
           <div className="hero-main">
@@ -374,22 +444,41 @@ export function PillRow({ items }: { items: string[] }) {
 export function CategoryBadge({
   category,
   label,
+  theme,
 }: {
   category: string;
   label?: string;
+  theme?: CategoryTheme;
 }) {
-  const theme = CATEGORY_THEME[category] ?? CATEGORY_THEME.other;
+  const resolvedTheme = theme ?? resolveCategoryTheme(category);
   return (
     <span
       className="category-badge"
       style={{
-        borderColor: theme.solid,
-        backgroundColor: theme.soft,
-        color: theme.text,
+        borderColor: resolvedTheme.solid,
+        backgroundColor: resolvedTheme.soft,
+        color: resolvedTheme.text,
       }}
     >
-      <span className="category-badge-dot" style={{ backgroundColor: theme.solid }} />
+      <span className="category-badge-dot" style={{ backgroundColor: resolvedTheme.solid }} />
       {label ?? categoryLabel(category)}
+    </span>
+  );
+}
+
+function InvestmentAssetClassBadge({
+  value,
+  label,
+  automatic = false,
+}: {
+  value?: string;
+  label?: string;
+  automatic?: boolean;
+}) {
+  const normalized = normalizeInvestmentAssetClass(value);
+  return (
+    <span className="investment-asset-class-badge" data-value={normalized || "automatic"} data-automatic={automatic}>
+      {label ?? investmentAssetClassLabel(normalized, "Automatic")}
     </span>
   );
 }
@@ -403,17 +492,464 @@ function isEditablePositionRow(row: Record<string, unknown>): row is Record<stri
     typeof row.instrumentKey === "string" &&
     typeof row.instrument === "string" &&
     typeof row.effectiveDate === "string" &&
-    typeof row.units === "number"
+    typeof row.units === "number" &&
+    typeof row.priceEur === "number"
   );
+}
+
+function displayPriceForScale(priceEur: number, priceScale: PriceScale | undefined) {
+  if (priceScale === "percent_of_par") {
+    return priceEur * 100;
+  }
+  return priceEur;
+}
+
+function normalizePriceInput(price: number, priceScale: PriceScale | undefined) {
+  if (priceScale === "percent_of_par") {
+    return price / 100;
+  }
+  return price;
 }
 
 export function CategoryEditor({ row }: { row: Record<string, unknown> }) {
   const editableRow = isEditableCategoryRow(row) ? row : null;
   const router = useRouter();
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const dialogTitleId = useId();
+  const searchFieldId = useId();
+  const [isOpen, setIsOpen] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState(editableRow?.categoryKey ?? "other");
+  const [selectedAssetClass, setSelectedAssetClass] = useState(
+    normalizeInvestmentAssetClass(editableRow?.investmentAssetClassOverride ?? ""),
+  );
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  if (!editableRow) {
+    return null;
+  }
+
+  const currentCategory = editableRow.categoryKey ?? "other";
+  const currentCategoryOverride = String(editableRow.categoryOverride ?? "").trim();
+  const currentCategoryLabel = editableRow.categoryLabel ?? categoryLabel(currentCategory);
+  const selectedCategoryLabel = categoryLabel(selectedCategory);
+  const isInvestmentRow = editableRow.groupKey === "investment";
+  const currentAssetClass = normalizeInvestmentAssetClass(editableRow.investmentAssetClass ?? "");
+  const currentAssetClassOverride = normalizeInvestmentAssetClass(editableRow.investmentAssetClassOverride ?? "");
+  const classifiedAssetClass = normalizeInvestmentAssetClass(editableRow.classifiedInvestmentAssetClass ?? "");
+  const currentAssetClassLabel = investmentAssetClassLabel(currentAssetClass, "Unclassified");
+  const selectedAssetClassLabel = investmentAssetClassLabel(selectedAssetClass, "Automatic");
+  const classifierAssetClassLabel = investmentAssetClassLabel(classifiedAssetClass, "Unclassified");
+  const rowTitle = String(editableRow.displayDescription ?? editableRow.description ?? "Transaction").trim() || "Transaction";
+  const secondaryDescription =
+    editableRow.displayDescription && editableRow.description && editableRow.displayDescription !== editableRow.description
+      ? editableRow.description
+      : "";
+  const rowMeta = [editableRow.date, editableRow.txType].filter(Boolean).join(" · ");
+  const categoryGroups = useMemo(
+    () => buildCategoryOptionGroupsForAmount(editableRow.signedAmount, currentCategory),
+    [currentCategory, editableRow.signedAmount],
+  );
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const visibleCategoryGroups = useMemo(() => {
+    if (!normalizedSearch) {
+      return categoryGroups;
+    }
+
+    return categoryGroups
+      .map((group) => {
+        const matchesGroup = group.label.toLowerCase().includes(normalizedSearch);
+        return {
+          ...group,
+          options: matchesGroup
+            ? group.options
+            : group.options.filter((option) => option.label.toLowerCase().includes(normalizedSearch)),
+        };
+      })
+      .filter((group) => group.options.length > 0);
+  }, [categoryGroups, normalizedSearch]);
+  const visibleOptionCount = visibleCategoryGroups.reduce((sum, group) => sum + group.options.length, 0);
+  const categoryChanged = selectedCategory !== currentCategory;
+  const assetClassChanged = isInvestmentRow && selectedAssetClass !== currentAssetClassOverride;
+  const canSave = categoryChanged || assetClassChanged;
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !isSaving) {
+        setIsOpen(false);
+        setError("");
+        setSearchQuery("");
+      }
+    };
+
+    const frame = window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+    window.addEventListener("keydown", handleKeyDown);
+    const previousOverflow = document.body.style.overflow;
+    const previousHtmlOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      document.documentElement.style.overflow = previousHtmlOverflow;
+    };
+  }, [isOpen, isSaving]);
+
+  const closeEditor = (force = false) => {
+    if (isSaving && !force) {
+      return;
+    }
+    setIsOpen(false);
+    setError("");
+    setSearchQuery("");
+  };
+
+  const submit = async () => {
+    if (!selectedCategory || isSaving || !canSave) {
+      return;
+    }
+
+    setIsSaving(true);
+    setError("");
+
+    try {
+      const response = await fetch("/api/row-overrides", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          override: {
+            rowId: editableRow.rowId,
+            description: editableRow.description,
+            transactionType: editableRow.txType,
+            signedAmount: editableRow.signedAmount,
+            category: categoryChanged ? selectedCategory : currentCategoryOverride,
+            assetClass: isInvestmentRow
+              ? assetClassChanged
+                ? selectedAssetClass
+                : currentAssetClassOverride
+              : currentAssetClassOverride,
+            source: "row_override",
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Could not save the classification change.");
+      }
+
+      closeEditor(true);
+      router.refresh();
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Could not save the classification change.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const openEditor = () => {
+    setError("");
+    setSearchQuery("");
+    setSelectedCategory(currentCategory);
+    setSelectedAssetClass(currentAssetClassOverride);
+    setIsOpen(true);
+  };
+
+  const dialog =
+    isOpen && typeof document !== "undefined" ? (
+      createPortal(
+        <div
+          className="detail-sheet-backdrop category-editor-backdrop"
+          role="presentation"
+          onClick={() => {
+            closeEditor();
+          }}
+        >
+          <aside
+            className="detail-sheet category-editor-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={dialogTitleId}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="detail-sheet-head category-editor-sheet-head">
+              <div>
+                <div className="detail-sheet-kicker">Transactions</div>
+                <h2 id={dialogTitleId}>Edit classification</h2>
+                <p>Update this transaction only. Similar rows, rules, and future imports stay unchanged.</p>
+              </div>
+              <div className="detail-sheet-head-actions">
+                <button
+                  type="button"
+                  className="detail-sheet-close"
+                  onClick={() => closeEditor()}
+                  aria-label="Close classification editor"
+                  disabled={isSaving}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            <div className="detail-sheet-body category-editor-sheet-body">
+              <section className="transactions-widget-section category-editor-context">
+                <div className="category-editor-context-copy">
+                  <strong>{rowTitle}</strong>
+                  {secondaryDescription ? <span>{secondaryDescription}</span> : null}
+                  {rowMeta ? <small>{rowMeta}</small> : null}
+                </div>
+                <div className="category-editor-context-amount">
+                  {formatEuro(editableRow.signedAmount ?? 0, { signed: true })}
+                </div>
+              </section>
+
+              <div className="category-editor-summary-grid" aria-label="Category selection summary">
+                <article className="category-editor-summary-card">
+                  <span className="category-editor-summary-card-label">Current</span>
+                  <CategoryBadge category={currentCategory} label={currentCategoryLabel} />
+                  <small>{categoryChanged ? "Current category on this row" : "No pending category change"}</small>
+                </article>
+                <article className="category-editor-summary-card" data-state={categoryChanged ? "pending" : "current"}>
+                  <span className="category-editor-summary-card-label">{categoryChanged ? "New category" : "Selected"}</span>
+                  <CategoryBadge category={selectedCategory} label={selectedCategoryLabel} />
+                  <small>{categoryChanged ? "Will be saved for this row only" : "Choose a different category to update it"}</small>
+                </article>
+              </div>
+
+              <section className="transactions-widget-section category-editor-selector">
+                <div className="category-editor-selector-head">
+                  <strong>Choose category</strong>
+                  <span>{normalizedSearch ? `${visibleOptionCount} matches` : `${visibleOptionCount} available`}</span>
+                </div>
+                <div className="field category-editor-search-field">
+                  <label htmlFor={searchFieldId}>Search categories</label>
+                  <input
+                    ref={searchInputRef}
+                    id={searchFieldId}
+                    type="search"
+                    placeholder="Search categories"
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                  />
+                </div>
+                <div className="category-editor-sheet-groups">
+                  {visibleCategoryGroups.length > 0 ? (
+                    visibleCategoryGroups.map((group) => (
+                      <section key={group.label} className="category-editor-sheet-group">
+                        <div className="category-editor-sheet-group-head">
+                          <strong>{group.label}</strong>
+                          <span>{group.options.length}</span>
+                        </div>
+                        <div className="category-editor-sheet-options">
+                          {group.options.map((option) => {
+                            const isCurrent = currentCategory === option.value;
+                            const isSelected = selectedCategory === option.value;
+
+                            return (
+                              <button
+                                key={option.value}
+                                type="button"
+                                className="category-editor-sheet-option"
+                                data-active={isSelected}
+                                data-current={isCurrent}
+                                onClick={() => setSelectedCategory(option.value)}
+                                disabled={isSaving}
+                                aria-pressed={isSelected}
+                              >
+                                <span className="category-editor-sheet-option-copy">
+                                  <CategoryBadge
+                                    category={option.value}
+                                    label={option.label}
+                                    theme={resolveCategoryTheme(option.value)}
+                                  />
+                                </span>
+                                <span className="category-editor-sheet-option-meta">
+                                  {isSaving && isSelected ? "Saving..." : isCurrent ? "Current" : isSelected ? "Selected" : "Choose"}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    ))
+                  ) : (
+                    <div className="category-editor-sheet-empty">No categories match that search.</div>
+                  )}
+                </div>
+              </section>
+
+              {isInvestmentRow ? (
+                <section className="transactions-widget-section category-editor-selector">
+                  <div className="category-editor-selector-head">
+                    <strong>Investment subcategory</strong>
+                    <span>{currentAssetClassOverride ? "Manual override" : "Automatic"}</span>
+                  </div>
+
+                  <div className="category-editor-summary-grid" aria-label="Investment subcategory selection summary">
+                    <article className="category-editor-summary-card">
+                      <span className="category-editor-summary-card-label">Current</span>
+                      <InvestmentAssetClassBadge value={currentAssetClass} label={currentAssetClassLabel} />
+                      <small>
+                        {currentAssetClassOverride
+                          ? "Current row-level investment subtype"
+                          : `Automatic result${currentAssetClass ? `: ${currentAssetClassLabel}` : ""}`}
+                      </small>
+                    </article>
+                    <article className="category-editor-summary-card" data-state={assetClassChanged ? "pending" : "current"}>
+                      <span className="category-editor-summary-card-label">
+                        {assetClassChanged ? "New subtype" : "Selected"}
+                      </span>
+                      <InvestmentAssetClassBadge
+                        value={selectedAssetClass}
+                        label={selectedAssetClassLabel}
+                        automatic={!selectedAssetClass}
+                      />
+                      <small>
+                        {selectedAssetClass
+                          ? "Will be saved for this row only"
+                          : currentAssetClassOverride
+                            ? `Revert to automatic: ${classifierAssetClassLabel}`
+                            : "Use the current automatic result"}
+                      </small>
+                    </article>
+                  </div>
+
+                  <div className="investment-asset-class-grid">
+                    <button
+                      type="button"
+                      className="investment-asset-class-option"
+                      data-active={selectedAssetClass === ""}
+                      data-current={currentAssetClassOverride === ""}
+                      onClick={() => setSelectedAssetClass("")}
+                      disabled={isSaving}
+                      aria-pressed={selectedAssetClass === ""}
+                    >
+                      <span className="investment-asset-class-option-copy">
+                        <InvestmentAssetClassBadge automatic />
+                        <small>{currentAssetClass ? `Follow ${currentAssetClassLabel}` : "Remove the manual subtype override."}</small>
+                      </span>
+                      <span className="investment-asset-class-option-meta">
+                        {isSaving && selectedAssetClass === ""
+                          ? "Saving..."
+                          : currentAssetClassOverride === ""
+                            ? "Saved"
+                            : selectedAssetClass === ""
+                              ? "Selected"
+                              : "Choose"}
+                      </span>
+                    </button>
+
+                    {EDITABLE_INVESTMENT_ASSET_CLASS_OPTIONS.map((option) => {
+                      const isCurrent = currentAssetClass === option.value;
+                      const isSelected = selectedAssetClass === option.value;
+                      const isSaved = currentAssetClassOverride === option.value;
+
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          className="investment-asset-class-option"
+                          data-active={isSelected}
+                          data-current={isSaved}
+                          onClick={() => setSelectedAssetClass(option.value)}
+                          disabled={isSaving}
+                          aria-pressed={isSelected}
+                        >
+                          <span className="investment-asset-class-option-copy">
+                            <InvestmentAssetClassBadge value={option.value} label={option.label} />
+                            <small>{option.note}</small>
+                          </span>
+                          <span className="investment-asset-class-option-meta">
+                            {isSaving && isSelected
+                              ? "Saving..."
+                              : isSaved
+                                ? "Saved"
+                                : isCurrent
+                                  ? "Current"
+                                  : isSelected
+                                    ? "Selected"
+                                    : "Choose"}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
+              ) : null}
+
+              {error ? <div className="table-action-error category-editor-error">{error}</div> : null}
+
+              <div className="category-editor-sheet-footer">
+                <span className="category-editor-helper">Only this transaction will be updated.</span>
+                <div className="category-editor-actions category-editor-sheet-actions">
+                  <button type="button" className="quick-button quick-button-ghost" onClick={() => closeEditor()} disabled={isSaving}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="quick-button category-editor-save-button"
+                    data-active={canSave}
+                    onClick={() => void submit()}
+                    disabled={!canSave || isSaving}
+                  >
+                    {isSaving ? "Saving..." : "Save change"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </aside>
+        </div>,
+        document.body,
+      )
+    ) : null;
+
+  return (
+    <div className="category-editor-inline">
+      <button
+        type="button"
+        className="category-editor-trigger"
+        aria-haspopup="dialog"
+        aria-expanded={isOpen}
+        onClick={openEditor}
+      >
+        <CategoryBadge
+          category={currentCategory}
+          label={currentCategoryLabel}
+        />
+        <span className="category-editor-caret">▾</span>
+      </button>
+      {dialog}
+    </div>
+  );
+}
+
+export function PositionHoldingEditor({ row }: { row: Record<string, unknown> }) {
+  const router = useRouter();
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [isOpen, setIsOpen] = useState(false);
-  const [selectedCategory, setSelectedCategory] = useState(editableRow?.categoryKey ?? "other");
+  const [draftUnits, setDraftUnits] = useState(
+    isEditablePositionRow(row)
+      ? row.unitsKnown === false && row.units <= 0.0000001
+        ? ""
+        : row.units.toFixed(6)
+      : "",
+  );
+  const [draftPrice, setDraftPrice] = useState(
+    isEditablePositionRow(row) ? displayPriceForScale(row.priceEur, row.priceScale).toFixed(row.priceScale === "percent_of_par" ? 4 : 6) : "",
+  );
+  const [draftEffectiveDate, setDraftEffectiveDate] = useState(isEditablePositionRow(row) ? row.effectiveDate : "");
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState("");
   const [menuPosition, setMenuPosition] = useState<{
@@ -424,7 +960,7 @@ export function CategoryEditor({ row }: { row: Record<string, unknown> }) {
     placement: "top" | "bottom";
   } | null>(null);
 
-  if (!editableRow) {
+  if (!isEditablePositionRow(row)) {
     return null;
   }
 
@@ -441,18 +977,17 @@ export function CategoryEditor({ row }: { row: Record<string, unknown> }) {
 
       const margin = 12;
       const gap = 8;
-      const preferredHeight = 320;
+      const preferredHeight = 360;
       const viewport = window.visualViewport;
       const viewportWidth = viewport?.width ?? window.innerWidth;
       const viewportHeight = viewport?.height ?? window.innerHeight;
-      const width = Math.max(260, Math.ceil(rect.width) + 18);
+      const width = Math.max(320, Math.ceil(rect.width) + 160);
       const spaceBelow = viewportHeight - rect.bottom - gap - margin;
       const spaceAbove = rect.top - gap - margin;
-      const placement = spaceBelow >= 220 || spaceBelow >= spaceAbove ? "bottom" : "top";
-      const maxHeight = Math.max(160, Math.min(preferredHeight, placement === "bottom" ? spaceBelow : spaceAbove));
+      const placement = spaceBelow >= 240 || spaceBelow >= spaceAbove ? "bottom" : "top";
+      const maxHeight = Math.max(220, Math.min(preferredHeight, placement === "bottom" ? spaceBelow : spaceAbove));
       const left = Math.max(margin, Math.min(rect.left, viewportWidth - width - margin)) + window.scrollX;
-      const top =
-        (placement === "bottom" ? rect.bottom + gap : rect.top - gap) + window.scrollY;
+      const top = (placement === "bottom" ? rect.bottom + gap : rect.top - gap) + window.scrollY;
 
       setMenuPosition({
         top,
@@ -479,10 +1014,7 @@ export function CategoryEditor({ row }: { row: Record<string, unknown> }) {
       setError("");
     };
 
-    const handleResize = () => {
-      setIsOpen(false);
-      setError("");
-    };
+    const handleResize = () => updatePosition();
 
     updatePosition();
     window.addEventListener("keydown", handleKeyDown);
@@ -499,7 +1031,36 @@ export function CategoryEditor({ row }: { row: Record<string, unknown> }) {
   }, [isOpen]);
 
   const submit = async () => {
-    if (!selectedCategory || isSaving) {
+    if (isSaving) {
+      return;
+    }
+
+    const nextDate = draftEffectiveDate.trim();
+    const unitsChanged = draftUnits.trim() !== (row.unitsKnown === false && row.units <= 0.0000001 ? "" : row.units.toFixed(6));
+    const priceChanged =
+      draftPrice.trim() !==
+      displayPriceForScale(row.priceEur, row.priceScale).toFixed(row.priceScale === "percent_of_par" ? 4 : 6);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(nextDate)) {
+      setError("Enter a valid effective date.");
+      return;
+    }
+
+    const units = draftUnits.trim() ? Number(draftUnits) : Number.NaN;
+    if (unitsChanged && (!Number.isFinite(units) || units < 0)) {
+      setError("Enter a valid non-negative unit count.");
+      return;
+    }
+
+    const displayPrice = Number(draftPrice);
+    if (!Number.isFinite(displayPrice) || displayPrice <= 0) {
+      setError("Enter a valid positive price.");
+      return;
+    }
+
+    const priceEur = normalizePriceInput(displayPrice, row.priceScale);
+    if (!Number.isFinite(priceEur) || priceEur <= 0) {
+      setError("Enter a valid positive price.");
       return;
     }
 
@@ -507,232 +1068,178 @@ export function CategoryEditor({ row }: { row: Record<string, unknown> }) {
     setError("");
 
     try {
-      const response = await fetch("/api/categories", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          rowId: editableRow.rowId,
-          description: editableRow.description,
-          txType: editableRow.txType,
-          merchant: editableRow.merchant,
-          signedAmount: editableRow.signedAmount,
-          category: selectedCategory,
-          mode: "row",
-        }),
-      });
+      const requests: Promise<Response>[] = [];
 
-      if (!response.ok) {
-        throw new Error("Could not save the category change.");
+      if (unitsChanged) {
+        requests.push(
+          fetch("/api/position-units", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              instrumentKey: row.instrumentKey,
+              isin: row.isin,
+              instrument: row.instrument,
+              units,
+              effectiveDate: nextDate,
+            }),
+          }),
+        );
+      }
+
+      if (priceChanged) {
+        requests.push(
+          fetch("/api/position-valuations", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              instrumentKey: row.instrumentKey,
+              isin: row.isin,
+              instrument: row.instrument,
+              priceEur,
+              effectiveDate: nextDate,
+            }),
+          }),
+        );
+      }
+
+      if (requests.length === 0) {
+        setIsOpen(false);
+        return;
+      }
+
+      const responses = await Promise.all(requests);
+      if (responses.some((response) => !response.ok)) {
+        throw new Error("Could not save the holding adjustment.");
       }
 
       setIsOpen(false);
       router.refresh();
     } catch (saveError) {
-      setSelectedCategory(editableRow.categoryKey ?? "other");
-      setError(saveError instanceof Error ? saveError.message : "Could not save the category change.");
+      setError(saveError instanceof Error ? saveError.message : "Could not save the holding adjustment.");
     } finally {
       setIsSaving(false);
     }
   };
 
-  const openMenu = () => {
+  const openEditor = () => {
+    setDraftUnits(row.unitsKnown === false && row.units <= 0.0000001 ? "" : row.units.toFixed(6));
+    setDraftPrice(
+      displayPriceForScale(row.priceEur, row.priceScale).toFixed(row.priceScale === "percent_of_par" ? 4 : 6),
+    );
+    setDraftEffectiveDate(row.effectiveDate);
     setError("");
-    setSelectedCategory(editableRow.categoryKey ?? "other");
-    setIsOpen((current) => !current);
+    setIsOpen(true);
   };
 
-  const canSave = selectedCategory !== (editableRow.categoryKey ?? "other");
-
-  const menu =
-    isOpen && typeof document !== "undefined" ? (
-      createPortal(
-        <div
-          ref={popoverRef}
-          className="category-editor-popover"
-          data-placement={menuPosition?.placement ?? "bottom"}
-          role="dialog"
-          aria-modal="false"
-          aria-label="Choose category"
-          style={{
-            top: menuPosition?.top ?? 0,
-            left: menuPosition?.left ?? 0,
-            width: menuPosition?.width ?? 260,
-            maxHeight: menuPosition?.maxHeight ?? 320,
-          }}
-        >
-          <div className="category-editor-dialog-head">
-            <div className="category-editor-popover-head">Choose category</div>
-            <div className="category-editor-dialog-title">
-              <strong>{editableRow.merchant || editableRow.description}</strong>
-              <span>{formatEuro(editableRow.signedAmount ?? 0, { signed: true })}</span>
-            </div>
-          </div>
-          <div className="category-editor-list">
-            {buildCategoryOptionGroupsForAmount(editableRow.signedAmount, editableRow.categoryKey).map((group) => (
-              <div key={group.label} className="category-editor-group">
-                <div className="category-editor-group-label">{group.label}</div>
-                {group.options.map((option) => {
-                  const isCurrent = editableRow.categoryKey === option.value;
-                  const isSelected = selectedCategory === option.value;
-
-                  return (
-                    <button
-                      key={option.value}
-                      type="button"
-                      className="category-editor-option"
-                      data-active={isSelected}
-                      data-current={isCurrent}
-                      onClick={() => setSelectedCategory(option.value)}
-                      disabled={isSaving}
-                    >
-                      <span className="category-editor-option-main">
-                        <span
-                          className="category-editor-option-dot"
-                          style={{ backgroundColor: (CATEGORY_THEME[option.value] ?? CATEGORY_THEME.other).solid }}
-                        />
-                        <span>{option.label}</span>
-                      </span>
-                      <span className="category-editor-option-meta">
-                        {isSaving && isSelected ? "Saving..." : isCurrent ? "Current" : isSelected ? "Selected" : ""}
-                      </span>
-                    </button>
-                  );
-                })}
+  const priceLabel = row.priceScale === "percent_of_par" ? "Price (% of par)" : "Price (EUR / unit)";
+  const sourceLabel = row.valuationSourceLabel ?? row.valuationSource ?? "Current";
+  const popover =
+    isOpen && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            ref={popoverRef}
+            className="position-holding-popover"
+            data-placement={menuPosition?.placement ?? "bottom"}
+            role="dialog"
+            aria-modal="false"
+            aria-label="Adjust holding"
+            style={{
+              top: menuPosition?.top ?? 0,
+              left: menuPosition?.left ?? 0,
+              width: menuPosition?.width ?? 320,
+              maxHeight: menuPosition?.maxHeight ?? 360,
+            }}
+          >
+            <div className="category-editor-dialog-head">
+              <div className="category-editor-popover-head">Adjust holding</div>
+              <div className="category-editor-dialog-title">
+                <strong>{row.instrument}</strong>
+                <span>{sourceLabel}</span>
               </div>
-            ))}
-          </div>
-          <div className="category-editor-helper">This changes only the selected transaction.</div>
-          {error ? <span className="table-action-error">{error}</span> : null}
-          <div className="category-editor-actions">
-            <button type="button" className="table-action-button table-action-button-secondary" onClick={() => setIsOpen(false)}>
-              Close
-            </button>
-            <button type="button" className="table-action-button" onClick={() => void submit()} disabled={!canSave || isSaving}>
-              {isSaving ? "Saving..." : "Save change"}
-            </button>
-          </div>
-        </div>,
-        document.body,
-      )
-    ) : null;
+            </div>
+            <div className="position-holding-form">
+              <label className="position-holding-field">
+                <span>Effective date</span>
+                <input
+                  className="position-units-input"
+                  type="date"
+                  value={draftEffectiveDate}
+                  onChange={(event) => setDraftEffectiveDate(event.target.value)}
+                />
+              </label>
+              <label className="position-holding-field">
+                <span>Units</span>
+                <input
+                  className="position-units-input"
+                  type="number"
+                  step="0.000001"
+                  min="0"
+                  value={draftUnits}
+                  onChange={(event) => {
+                    setDraftUnits(event.target.value);
+                    if (error) {
+                      setError("");
+                    }
+                  }}
+                  placeholder="0.000000"
+                />
+              </label>
+              <label className="position-holding-field">
+                <span>{priceLabel}</span>
+                <input
+                  className="position-units-input"
+                  type="number"
+                  step={row.priceScale === "percent_of_par" ? "0.0001" : "0.000001"}
+                  min="0"
+                  value={draftPrice}
+                  onChange={(event) => {
+                    setDraftPrice(event.target.value);
+                    if (error) {
+                      setError("");
+                    }
+                  }}
+                />
+              </label>
+            </div>
+            <div className="position-holding-helper">
+              Live quotes still take priority. Manual price is used when no valid live quote is available.
+            </div>
+            {error ? <span className="table-action-error">{error}</span> : null}
+            <div className="position-units-actions">
+              <button type="button" className="table-action-button table-action-button-secondary" onClick={() => setIsOpen(false)} disabled={isSaving}>
+                Close
+              </button>
+              <button type="button" className="table-action-button" onClick={() => void submit()} disabled={isSaving}>
+                {isSaving ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>,
+          document.body,
+        )
+      : null;
 
   return (
-    <div className="category-editor-inline">
+    <div className="position-units-inline">
       <button
         ref={triggerRef}
         type="button"
-        className="category-editor-trigger"
-        aria-expanded={isOpen}
-        onClick={openMenu}
+        className="position-holding-trigger"
+        onClick={openEditor}
       >
-        <CategoryBadge
-          category={editableRow.categoryKey ?? "other"}
-          label={editableRow.categoryLabel ?? editableRow.categoryKey ?? "Other"}
-        />
+        <span>Adjust</span>
         <span className="category-editor-caret">▾</span>
       </button>
-      {menu}
+      {popover}
     </div>
   );
 }
 
 export function PositionUnitsEditor({ row }: { row: Record<string, unknown> }) {
-  const router = useRouter();
-  const [isOpen, setIsOpen] = useState(false);
-  const [draftUnits, setDraftUnits] = useState(isEditablePositionRow(row) ? row.units.toFixed(6) : "");
-  const [isSaving, setIsSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  if (!isEditablePositionRow(row)) {
-    return null;
-  }
-
-  const submit = async () => {
-    const units = Number(draftUnits);
-    if (!Number.isFinite(units) || units < 0 || isSaving) {
-      setError("Enter a valid non-negative unit count.");
-      return;
-    }
-
-    setIsSaving(true);
-    setError("");
-
-    try {
-      const response = await fetch("/api/position-units", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          instrumentKey: row.instrumentKey,
-          isin: row.isin,
-          instrument: row.instrument,
-          units,
-          effectiveDate: row.effectiveDate,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Could not save the units change.");
-      }
-
-      setIsOpen(false);
-      router.refresh();
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Could not save the units change.");
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  if (!isOpen) {
-    return (
-      <div className="position-units-inline">
-        <button
-          type="button"
-          className="position-units-trigger"
-          onClick={() => {
-            setDraftUnits(row.units.toFixed(6));
-            setError("");
-            setIsOpen(true);
-          }}
-        >
-          <span>{row.units.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 6 })}</span>
-          <span className="category-editor-caret">▾</span>
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="position-units-editor">
-      <input
-        className="position-units-input"
-        type="number"
-        step="0.000001"
-        min="0"
-        value={draftUnits}
-        autoFocus
-        onChange={(event) => {
-          setDraftUnits(event.target.value);
-          if (error) {
-            setError("");
-          }
-        }}
-      />
-      <div className="position-units-actions">
-        <button type="button" className="table-action-button" onClick={() => void submit()} disabled={isSaving}>
-          Save
-        </button>
-        <button type="button" className="table-action-button table-action-button-secondary" onClick={() => setIsOpen(false)} disabled={isSaving}>
-          Close
-        </button>
-      </div>
-      {error ? <span className="table-action-error">{error}</span> : null}
-    </div>
-  );
+  return <PositionHoldingEditor row={row} />;
 }
 
 export function MetricGrid({ items }: { items: MetricItem[] }) {
@@ -844,17 +1351,10 @@ function MetricValueDisplay({ value }: { value: string }) {
     return <span className="metric-number">{value}</span>;
   }
 
-  const rawNumber = `${hasLeadingPositiveSign ? "+" : ""}${match[2]}`;
-  const parsedNumber = Number(rawNumber.replaceAll(",", ""));
-  const displayNumber =
-    Number.isFinite(parsedNumber) && Math.abs(parsedNumber) >= 10_000
-      ? `${parsedNumber > 0 ? "+" : parsedNumber < 0 ? "-" : ""}${Math.abs(parsedNumber).toLocaleString("en-US", { maximumFractionDigits: 0 })}`
-      : rawNumber;
-
   return (
     <span className="metric-value-shell">
       <span className="metric-currency">{match[1]}</span>
-      <span className="metric-number">{displayNumber}</span>
+      <span className="metric-number">{`${hasLeadingPositiveSign ? "+" : ""}${match[2]}`}</span>
     </span>
   );
 }
@@ -1005,6 +1505,7 @@ export function DetailSheet({
   onClose: () => void;
 }) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const [sortState, setSortState] = useState<TableSortState | null>(null);
 
   useEffect(() => {
     if (!open) {
@@ -1038,6 +1539,32 @@ export function DetailSheet({
     bodyRef.current?.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [open, detail]);
 
+  useEffect(() => {
+    setSortState(null);
+  }, [detail]);
+
+  const sortedRows = useMemo(() => {
+    if (!detail || !sortState) {
+      return detail?.rows ?? [];
+    }
+
+    return detail.rows
+      .map((row, index) => ({ row, index }))
+      .sort((left, right) => {
+        const comparison = compareDetailTableValues(
+          left.row[sortState.key as keyof typeof left.row],
+          right.row[sortState.key as keyof typeof right.row],
+        );
+
+        if (comparison !== 0) {
+          return sortState.direction === "asc" ? comparison : -comparison;
+        }
+
+        return left.index - right.index;
+      })
+      .map(({ row }) => row);
+  }, [detail, sortState]);
+
   if (!open) {
     return null;
   }
@@ -1065,22 +1592,89 @@ export function DetailSheet({
             <h2>{detail.title}</h2>
             {detail.meta ? <p>{detail.meta}</p> : null}
           </div>
-          <button type="button" className="detail-sheet-close" onClick={onClose} aria-label="Close details">
-            <X size={18} />
-          </button>
+          <div className="detail-sheet-head-actions">
+            {detail.actionHref ? (
+              <a href={detail.actionHref} className="detail-sheet-link">
+                {detail.actionLabel ?? "Open"}
+              </a>
+            ) : null}
+            <button type="button" className="detail-sheet-close" onClick={onClose} aria-label="Close details">
+              <X size={18} />
+            </button>
+          </div>
         </div>
         <div ref={bodyRef} className="detail-sheet-body">
-          {detail.summary && detail.summary.length > 0 ? (
-            <div className="detail-summary-grid">
-              {detail.summary.map((item) => (
-                <div key={item.label} className="detail-summary-card">
-                  <div className="detail-summary-label">{item.label}</div>
-                  <div className="detail-summary-value">{item.value}</div>
+          {detail.trend || (detail.summary && detail.summary.length > 0) ? (
+            <div className="detail-overview-grid" data-has-trend={detail.trend ? "true" : undefined}>
+              {detail.trend ? (
+                <section className="detail-trend-card">
+                  <div className="detail-trend-head">
+                    <div className="detail-trend-copy">
+                      <strong>{detail.trend.title}</strong>
+                      {detail.trend.note ? <span>{detail.trend.note}</span> : null}
+                    </div>
+                  </div>
+                  <div className="detail-trend-chart">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={detail.trend.data} margin={{ top: 8, right: 8, left: -14, bottom: 0 }}>
+                        <CartesianGrid stroke="rgba(223,231,243,0.06)" vertical={false} />
+                        <XAxis
+                          dataKey="displayMonthLabel"
+                          stroke="hsl(var(--text-muted))"
+                          fontSize={10}
+                          tickLine={false}
+                          axisLine={false}
+                          interval={0}
+                          minTickGap={0}
+                        />
+                        <YAxis
+                          stroke="hsl(var(--text-muted))"
+                          fontSize={10}
+                          tickLine={false}
+                          axisLine={false}
+                          width={48}
+                          tickFormatter={(value) => detailTrendAxisFormatter.format(Number(value ?? 0))}
+                        />
+                        <Tooltip
+                          cursor={{ fill: "hsla(var(--text), 0.03)" }}
+                          content={
+                            <ChartTooltipContent
+                              formatLabel={(label) => String(label ?? "")}
+                              formatValue={(value) => [formatEuro(Number(value ?? 0)), detail.trend?.valueLabel ?? "Amount"]}
+                            />
+                          }
+                        />
+                        <Bar
+                          dataKey="value"
+                          name={detail.trend.valueLabel}
+                          fill={detail.trend.color ?? "hsl(var(--accent-primary))"}
+                          radius={[0, 0, 0, 0]}
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </section>
+              ) : null}
+              {detail.summary && detail.summary.length > 0 ? (
+                <div className="detail-summary-grid">
+                  {detail.summary.map((item) => (
+                    <div key={item.label} className="detail-summary-card">
+                      <div className="detail-summary-label">{item.label}</div>
+                      <div className="detail-summary-value">{item.value}</div>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              ) : null}
             </div>
           ) : null}
-          <DataTable columns={detail.columns} rows={detail.rows} emptyMessage={detail.emptyMessage} />
+          <DataTable
+            columns={detail.columns}
+            rows={sortedRows}
+            emptyMessage={detail.emptyMessage}
+            stickyHeader
+            sortState={sortState}
+            onSortChange={setSortState}
+          />
         </div>
       </aside>
     </div>,

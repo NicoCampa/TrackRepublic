@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "csv-parse/sync";
+import { normalizeCategoryKey } from "./category-config";
+import { normalizeInvestmentAssetClass } from "./investment-asset-class";
 
 const ROOT = process.cwd();
 export const CONFIG_DIR = path.join(ROOT, "config");
@@ -12,8 +14,12 @@ export const MANUAL_RULES_PATH = path.join(CONFIG_DIR, "manual_category_rules.cs
 export const ROW_OVERRIDES_PATH = path.join(CONFIG_DIR, "transaction_overrides.csv");
 export const MANUAL_TRANSACTIONS_PATH = path.join(CONFIG_DIR, "manual_transactions.csv");
 export const POSITION_OVERRIDES_PATH = path.join(CONFIG_DIR, "position_unit_overrides.csv");
+export const POSITION_VALUATION_OVERRIDES_PATH = path.join(CONFIG_DIR, "position_valuation_overrides.csv");
 export const INSTRUMENT_REGISTRY_PATH = path.join(CONFIG_DIR, "instrument_registry.csv");
+export const CLASSIFIER_PROMPT_TEMPLATE_PATH = path.join(CONFIG_DIR, "classifier_prompt_template.txt");
+export const INVESTMENT_ASSET_CLASS_PROMPT_TEMPLATE_PATH = path.join(CONFIG_DIR, "investment_asset_class_prompt_template.txt");
 export const PIPELINE_SUMMARY_PATH = path.join(DATA_DIR, "pipeline_summary.json");
+export const IMPORT_REGISTRY_PATH = path.join(DATA_DIR, "import_registry.json");
 export const CATEGORY_CACHE_PATH = path.join(DATA_DIR, "statement_transactions_category_cache.json");
 
 export const MANUAL_RULE_COLUMNS = [
@@ -24,12 +30,7 @@ export const MANUAL_RULE_COLUMNS = [
   "pattern",
   "transaction_type",
   "amount_sign",
-  "merchant",
-  "group",
   "category",
-  "subcategory",
-  "confidence",
-  "needs_review",
 ] as const;
 
 export const ROW_OVERRIDE_COLUMNS = [
@@ -37,13 +38,11 @@ export const ROW_OVERRIDE_COLUMNS = [
   "description",
   "transaction_type",
   "signed_amount",
-  "merchant",
-  "group",
   "category",
-  "subcategory",
-  "confidence",
-  "needs_review",
+  "asset_class",
   "source",
+  "link_group_id",
+  "link_role",
   "updated_at",
 ] as const;
 
@@ -51,11 +50,29 @@ export const MANUAL_TRANSACTION_COLUMNS = [
   "row_id",
   "date",
   "transaction_type",
-  "merchant",
   "description",
   "signed_amount",
   "category",
-  "subcategory",
+  "link_group_id",
+  "link_role",
+  "updated_at",
+] as const;
+
+export const POSITION_UNIT_OVERRIDE_COLUMNS = [
+  "instrument_key",
+  "isin",
+  "instrument",
+  "units",
+  "effective_date",
+  "updated_at",
+] as const;
+
+export const POSITION_VALUATION_OVERRIDE_COLUMNS = [
+  "instrument_key",
+  "isin",
+  "instrument",
+  "price_eur",
+  "effective_date",
   "updated_at",
 ] as const;
 
@@ -65,6 +82,8 @@ export const INSTRUMENT_REGISTRY_COLUMNS = [
   "symbol",
   "instrument",
   "asset_class",
+  "price_scale",
+  "fallback_valuation",
   "country",
   "sector",
   "industry",
@@ -80,26 +99,21 @@ export type ManualRuleRecord = {
   pattern: string;
   transactionType: string;
   amountSign: string;
-  merchant: string;
-  group: string;
   category: string;
-  subcategory: string;
-  confidence: number;
-  needsReview: boolean;
 };
+
+export type TransactionLinkRole = "net" | "member" | "";
 
 export type RowOverrideRecord = {
   rowId: string;
   description: string;
   transactionType: string;
   signedAmount: number;
-  merchant: string;
-  group: string;
   category: string;
-  subcategory: string;
-  confidence: number;
-  needsReview: boolean;
+  assetClass: string;
   source: string;
+  linkGroupId: string;
+  linkRole: TransactionLinkRole;
   updatedAt: string;
 };
 
@@ -107,11 +121,11 @@ export type ManualTransactionRecord = {
   rowId: string;
   date: string;
   transactionType: string;
-  merchant: string;
   description: string;
   signedAmount: number;
   category: string;
-  subcategory: string;
+  linkGroupId: string;
+  linkRole: TransactionLinkRole;
   updatedAt: string;
 };
 
@@ -121,6 +135,8 @@ export type InstrumentRegistryEntry = {
   symbol: string;
   instrument: string;
   assetClass: string;
+  priceScale: string;
+  fallbackValuation: string;
   country: string;
   sector: string;
   industry: string;
@@ -132,15 +148,18 @@ export type PipelineSummary = {
   sourcePdf: string;
   sourceTransactionsCsv: string;
   sourceArchivePath?: string;
+  sourcePdfSha256?: string;
+  statementFingerprint?: string;
   mode: "parse_classify" | "reclassify" | "refresh_reclassify";
   startedAt: string;
   completedAt?: string;
   status: "idle" | "running" | "completed" | "failed";
+  published?: boolean;
   message?: string;
   model?: string;
   transactionRowCount?: number;
   fundRowCount?: number;
-  reviewCount?: number;
+  duplicatesDropped?: number;
   cacheEntryCount?: number;
   cacheHits?: number;
   cacheMisses?: number;
@@ -167,6 +186,7 @@ export function normalizePipelineSummary(payload: unknown): PipelineSummary | nu
   }
 
   const value = payload as Record<string, unknown>;
+  const status = String(value.status ?? "completed") as PipelineSummary["status"];
   const timestamps =
     value.timestamps && typeof value.timestamps === "object"
       ? (value.timestamps as Record<string, unknown>)
@@ -183,6 +203,14 @@ export function normalizePipelineSummary(payload: unknown): PipelineSummary | nu
       value.sourceArchivePath !== undefined || value.source_archive_path !== undefined
         ? String(value.sourceArchivePath ?? value.source_archive_path ?? "")
         : undefined,
+    sourcePdfSha256:
+      value.sourcePdfSha256 !== undefined || value.source_pdf_sha256 !== undefined
+        ? String(value.sourcePdfSha256 ?? value.source_pdf_sha256 ?? "")
+        : undefined,
+    statementFingerprint:
+      value.statementFingerprint !== undefined || value.statement_fingerprint !== undefined
+        ? String(value.statementFingerprint ?? value.statement_fingerprint ?? "")
+        : undefined,
     mode: String(value.mode ?? "reclassify") as PipelineSummary["mode"],
     startedAt: String(value.startedAt ?? value.started_at ?? timestamps.startedAt ?? timestamps.started_at ?? ""),
     completedAt:
@@ -192,7 +220,11 @@ export function normalizePipelineSummary(payload: unknown): PipelineSummary | nu
       timestamps.completed_at !== undefined
         ? String(value.completedAt ?? value.completed_at ?? timestamps.completedAt ?? timestamps.completed_at ?? "")
         : undefined,
-    status: String(value.status ?? "completed") as PipelineSummary["status"],
+    status,
+    published:
+      value.published !== undefined
+        ? parseBoolean(String(value.published), status === "completed")
+        : status === "completed",
     message:
       value.message !== undefined || value.error !== undefined
         ? String(value.message ?? value.error ?? "")
@@ -203,7 +235,7 @@ export function normalizePipelineSummary(payload: unknown): PipelineSummary | nu
       0,
     ),
     fundRowCount: parseNumber(String(value.fundRowCount ?? value.fund_row_count ?? ""), 0),
-    reviewCount: parseNumber(String(value.reviewCount ?? value.review_count ?? ""), 0),
+    duplicatesDropped: parseNumber(String(value.duplicatesDropped ?? value.duplicates_dropped ?? ""), 0),
     cacheEntryCount: parseNumber(String(value.cacheEntryCount ?? value.cache_entry_count ?? ""), 0),
     cacheHits: parseNumber(String(value.cacheHits ?? value.cache_hits ?? ""), 0),
     cacheMisses: parseNumber(String(value.cacheMisses ?? value.cache_misses ?? ""), 0),
@@ -224,6 +256,22 @@ export function normalizePipelineSummary(payload: unknown): PipelineSummary | nu
   };
 }
 
+export function loadClassifierPromptTemplateSync() {
+  try {
+    return readFileSync(CLASSIFIER_PROMPT_TEMPLATE_PATH, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+export function loadInvestmentAssetClassPromptTemplateSync() {
+  try {
+    return readFileSync(INVESTMENT_ASSET_CLASS_PROMPT_TEMPLATE_PATH, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
 function parseBoolean(value: string | undefined, defaultValue = false) {
   const normalized = (value ?? "").trim().toLowerCase();
   if (!normalized) {
@@ -235,6 +283,46 @@ function parseBoolean(value: string | undefined, defaultValue = false) {
 function parseNumber(value: string | undefined, defaultValue = 0) {
   const numeric = Number(value ?? defaultValue);
   return Number.isFinite(numeric) ? numeric : defaultValue;
+}
+
+function normalizeLinkRole(value: string | undefined): TransactionLinkRole {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (normalized === "net" || normalized === "member") {
+    return normalized;
+  }
+  return "";
+}
+
+function extractLegacyLinkMetadata(subcategory: string | undefined) {
+  const value = (subcategory ?? "").trim();
+  if (value.startsWith("connected_expense_net:")) {
+    return {
+      linkGroupId: value.slice("connected_expense_net:".length).trim(),
+      linkRole: "net" as const,
+    };
+  }
+  if (value.startsWith("connected_expense_member:")) {
+    return {
+      linkGroupId: value.slice("connected_expense_member:".length).trim(),
+      linkRole: "member" as const,
+    };
+  }
+  return {
+    linkGroupId: "",
+    linkRole: "" as const,
+  };
+}
+
+function readLinkMetadata(row: Record<string, string>) {
+  const directGroupId = (row.link_group_id ?? "").trim();
+  const directRole = normalizeLinkRole(row.link_role);
+  if (directGroupId || directRole) {
+    return {
+      linkGroupId: directGroupId,
+      linkRole: directRole,
+    };
+  }
+  return extractLegacyLinkMetadata(row.subcategory);
 }
 
 function csvEscape(value: string) {
@@ -293,6 +381,7 @@ function normalizeManualRule(row: Record<string, string>, index: number): Manual
   if (!pattern) {
     return null;
   }
+  const category = normalizeCategoryKey((row.category ?? "").trim()) || "other";
   return {
     id: (row.id ?? "").trim() || ensureId("rule", row.name || pattern || String(index + 1)),
     enabled: parseBoolean(row.enabled, true),
@@ -301,12 +390,7 @@ function normalizeManualRule(row: Record<string, string>, index: number): Manual
     pattern,
     transactionType: (row.transaction_type ?? "").trim(),
     amountSign: (row.amount_sign ?? "").trim().toLowerCase(),
-    merchant: (row.merchant ?? "").trim(),
-    group: (row.group ?? "").trim(),
-    category: (row.category ?? "").trim(),
-    subcategory: (row.subcategory ?? "").trim(),
-    confidence: parseNumber(row.confidence, 0.99),
-    needsReview: parseBoolean(row.needs_review, false),
+    category,
   };
 }
 
@@ -319,12 +403,7 @@ function toManualRuleRow(rule: ManualRuleRecord): Record<string, string> {
     pattern: rule.pattern,
     transaction_type: rule.transactionType,
     amount_sign: rule.amountSign,
-    merchant: rule.merchant,
-    group: rule.group,
     category: rule.category,
-    subcategory: rule.subcategory,
-    confidence: rule.confidence.toFixed(2),
-    needs_review: String(rule.needsReview),
   };
 }
 
@@ -333,20 +412,30 @@ function normalizeRowOverride(row: Record<string, string>): RowOverrideRecord | 
   if (!rowId) {
     return null;
   }
-  return {
+  const link = readLinkMetadata(row);
+  const category = normalizeCategoryKey((row.category ?? "").trim());
+  const override = {
     rowId,
     description: (row.description ?? "").trim(),
     transactionType: (row.transaction_type ?? "").trim(),
     signedAmount: parseNumber(row.signed_amount, 0),
-    merchant: (row.merchant ?? "").trim(),
-    group: (row.group ?? "").trim(),
-    category: (row.category ?? "").trim(),
-    subcategory: (row.subcategory ?? "").trim(),
-    confidence: parseNumber(row.confidence, 0.99),
-    needsReview: parseBoolean(row.needs_review, false),
+    category,
+    assetClass: normalizeInvestmentAssetClass(row.asset_class ?? ""),
     source: (row.source ?? "").trim() || "row_override",
+    linkGroupId: link.linkGroupId,
+    linkRole: link.linkRole,
     updatedAt: (row.updated_at ?? "").trim(),
   };
+  if (
+    override.source !== "deleted_transaction" &&
+    !override.category &&
+    !override.assetClass &&
+    !override.linkGroupId &&
+    !override.linkRole
+  ) {
+    return null;
+  }
+  return override;
 }
 
 function toRowOverrideRow(override: RowOverrideRecord): Record<string, string> {
@@ -355,13 +444,11 @@ function toRowOverrideRow(override: RowOverrideRecord): Record<string, string> {
     description: override.description,
     transaction_type: override.transactionType,
     signed_amount: String(override.signedAmount),
-    merchant: override.merchant,
-    group: override.group,
     category: override.category,
-    subcategory: override.subcategory,
-    confidence: override.confidence.toFixed(2),
-    needs_review: String(override.needsReview),
+    asset_class: override.assetClass,
     source: override.source || "row_override",
+    link_group_id: override.linkGroupId,
+    link_role: override.linkRole,
     updated_at: override.updatedAt,
   };
 }
@@ -372,15 +459,19 @@ function normalizeManualTransaction(row: Record<string, string>): ManualTransact
   if (!rowId || !date) {
     return null;
   }
+  const link = readLinkMetadata(row);
+  const legacyDescription = (row.description ?? "").trim();
+  const legacyMerchant = (row.merchant ?? "").trim();
+  const category = normalizeCategoryKey((row.category ?? "").trim()) || "other";
   return {
     rowId,
     date,
     transactionType: (row.transaction_type ?? "").trim(),
-    merchant: (row.merchant ?? "").trim(),
-    description: (row.description ?? "").trim(),
+    description: legacyDescription || legacyMerchant || "Manual entry",
     signedAmount: parseNumber(row.signed_amount, 0),
-    category: (row.category ?? "").trim() || "other",
-    subcategory: (row.subcategory ?? "").trim() || "manual_entry",
+    category,
+    linkGroupId: link.linkGroupId,
+    linkRole: link.linkRole,
     updatedAt: (row.updated_at ?? "").trim(),
   };
 }
@@ -390,11 +481,11 @@ function toManualTransactionRow(transaction: ManualTransactionRecord): Record<st
     row_id: transaction.rowId,
     date: transaction.date,
     transaction_type: transaction.transactionType,
-    merchant: transaction.merchant,
     description: transaction.description,
     signed_amount: String(transaction.signedAmount),
     category: transaction.category,
-    subcategory: transaction.subcategory,
+    link_group_id: transaction.linkGroupId,
+    link_role: transaction.linkRole,
     updated_at: transaction.updatedAt,
   };
 }
@@ -410,6 +501,8 @@ function normalizeInstrumentRegistryEntry(row: Record<string, string>): Instrume
     symbol: (row.symbol ?? "").trim(),
     instrument: (row.instrument ?? "").trim(),
     assetClass: (row.asset_class ?? "").trim(),
+    priceScale: (row.price_scale ?? "").trim(),
+    fallbackValuation: (row.fallback_valuation ?? "").trim(),
     country: (row.country ?? "").trim(),
     sector: (row.sector ?? "").trim(),
     industry: (row.industry ?? "").trim(),
@@ -514,6 +607,8 @@ export async function ensureConfigScaffolding() {
   await Promise.all([
     ensureCsvFile(MANUAL_RULES_PATH, MANUAL_RULE_COLUMNS),
     ensureCsvFile(ROW_OVERRIDES_PATH, ROW_OVERRIDE_COLUMNS),
+    ensureCsvFile(POSITION_OVERRIDES_PATH, POSITION_UNIT_OVERRIDE_COLUMNS),
+    ensureCsvFile(POSITION_VALUATION_OVERRIDES_PATH, POSITION_VALUATION_OVERRIDE_COLUMNS),
     ensureCsvFile(INSTRUMENT_REGISTRY_PATH, INSTRUMENT_REGISTRY_COLUMNS),
   ]);
 }

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { CATEGORY_LABELS } from "@/lib/category-config";
+import { isKnownCategory, normalizeCategoryKey } from "@/lib/category-config";
 import { loadManualTransactions, saveManualTransactions, type ManualTransactionRecord } from "@/lib/config-store";
 
 export const runtime = "nodejs";
@@ -14,24 +14,23 @@ function slug(value: string) {
 
 function normalizeTransaction(input: Partial<ManualTransactionRecord>): ManualTransactionRecord {
   const date = String(input.date ?? "").trim();
-  const merchant = String(input.merchant ?? "").trim();
   const description = String(input.description ?? "").trim();
-  const category = String(input.category ?? "other").trim() || "other";
+  const category = normalizeCategoryKey(input.category ?? "other") || "other";
   const signedAmount = Number(input.signedAmount ?? 0);
   const txType = String(input.transactionType ?? "Manual").trim() || "Manual";
   const rowId =
     String(input.rowId ?? "").trim() ||
-    `manual-${date || new Date().toISOString().slice(0, 10)}-${slug(merchant || description || category)}-${Date.now()}`;
+    `manual-${date || new Date().toISOString().slice(0, 10)}-${slug(description || category)}-${Date.now()}`;
 
   return {
     rowId,
     date,
     transactionType: txType,
-    merchant: merchant || "Manual entry",
-    description: description || merchant || "Manual entry",
+    description: description || "Manual entry",
     signedAmount,
     category,
-    subcategory: String(input.subcategory ?? "manual_entry").trim() || "manual_entry",
+    linkGroupId: String(input.linkGroupId ?? "").trim(),
+    linkRole: input.linkRole === "net" || input.linkRole === "member" ? input.linkRole : "",
     updatedAt: String(input.updatedAt ?? new Date().toISOString()),
   };
 }
@@ -53,7 +52,7 @@ export async function POST(request: Request) {
     incoming.some(
       (item) =>
         !item.date ||
-        !CATEGORY_LABELS[item.category] ||
+        !isKnownCategory(item.category) ||
         !Number.isFinite(item.signedAmount) ||
         item.signedAmount === 0,
     )

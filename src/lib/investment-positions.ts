@@ -3,7 +3,11 @@ import type { CapitalPoint, TransactionRecord } from "./dashboard-data";
 const ISIN_RE = /\b[A-Z0-9]{12}\b/;
 const QUANTITY_RE = /quantity:\s*([0-9.]+)/i;
 
-export type AssetClass = "crypto" | "etf" | "bond_etf" | "gold" | "stock" | "bond" | "other";
+export type AssetClass = "crypto" | "etf" | "bond_etf" | "gold" | "stock" | "bond" | "private_market" | "other";
+export type PriceScale = "absolute" | "percent_of_par";
+export type ValuationSource = "live_quote" | "manual_price" | "statement_price" | "cost_basis";
+export type FallbackValuation = Exclude<ValuationSource, "live_quote" | "manual_price">;
+export type QuoteSearchMode = "broad" | "strict" | "disabled";
 
 export type InstrumentRegistryLookup = Record<
   string,
@@ -13,6 +17,8 @@ export type InstrumentRegistryLookup = Record<
     symbol?: string;
     instrument?: string;
     assetClass?: string;
+    priceScale?: string;
+    fallbackValuation?: string;
     country?: string;
     sector?: string;
     industry?: string;
@@ -27,6 +33,8 @@ type InstrumentAlias = {
   symbolHint?: string;
   searchQuery?: string;
   assetClass?: AssetClass;
+  priceScale?: PriceScale;
+  fallbackValuation?: FallbackValuation;
 };
 
 const INSTRUMENT_ALIASES: Array<{ pattern: RegExp; alias: InstrumentAlias }> = [
@@ -221,6 +229,9 @@ export type InvestmentInstrument = {
   symbolHint?: string;
   searchQuery: string;
   assetClass: AssetClass;
+  priceScale: PriceScale;
+  fallbackValuation: FallbackValuation;
+  quoteSearchMode: QuoteSearchMode;
 };
 
 export type ParsedInvestmentTrade = {
@@ -231,6 +242,8 @@ export type ParsedInvestmentTrade = {
   instrumentKey: string;
   instrument: string;
   assetClass: AssetClass;
+  priceScale: PriceScale;
+  fallbackValuation: FallbackValuation;
   units: number | null;
 };
 
@@ -239,6 +252,7 @@ export type LiveQuote = {
   isin: string;
   instrument: string;
   assetClass: AssetClass;
+  priceScale: PriceScale;
   country: string;
   industry: string;
   sector?: string;
@@ -256,16 +270,20 @@ export type PositionRecord = {
   isin: string;
   instrument: string;
   assetClass: AssetClass;
+  priceScale: PriceScale;
   country: string;
   industry: string;
   sector?: string;
   symbol: string;
   units: number;
+  unitsKnown: boolean;
   price: number;
   priceEur: number;
   quoteCurrency: string;
   marketValueEur: number;
   asOf: string;
+  valuationSource: ValuationSource;
+  valuationAsOf: string;
   rowsWithQuantity: number;
   rowsWithEstimatedUnits: number;
   rowsWithoutQuantity: number;
@@ -296,24 +314,112 @@ export type PositionUnitOverride = {
   updatedAt: string;
 };
 
+export type PositionValuationOverride = {
+  instrumentKey: string;
+  isin: string;
+  instrument: string;
+  priceEur: number;
+  effectiveDate: string;
+  updatedAt: string;
+};
+
+export type PositionUnitOverridesByInstrument = Record<string, PositionUnitOverride[]>;
+export type PositionValuationOverridesByInstrument = Record<string, PositionValuationOverride[]>;
+
 function normalizeAssetClass(value?: string): AssetClass {
   const normalized = (value ?? "").trim().toLowerCase();
-  if (normalized === "crypto" || normalized === "etf" || normalized === "bond_etf" || normalized === "gold" || normalized === "stock" || normalized === "bond") {
+  if (normalized === "commodity" || normalized === "gold") {
+    return "gold";
+  }
+  if (normalized === "bond_etf") {
+    return "etf";
+  }
+  if (
+    normalized === "crypto" ||
+    normalized === "etf" ||
+    normalized === "stock" ||
+    normalized === "bond" ||
+    normalized === "private_market"
+  ) {
     return normalized;
   }
   return "other";
 }
 
+function applyPreferredAssetClass(
+  instrument: InvestmentInstrument,
+  preferredAssetClass: AssetClass,
+): InvestmentInstrument {
+  if (preferredAssetClass === "other" || preferredAssetClass === instrument.assetClass) {
+    return instrument;
+  }
+
+  let quoteSearchMode: QuoteSearchMode = "broad";
+  if (preferredAssetClass === "private_market") {
+    quoteSearchMode = instrument.searchQuery || instrument.isin ? "strict" : "disabled";
+  } else if (preferredAssetClass === "bond") {
+    quoteSearchMode = instrument.searchQuery || instrument.isin ? "strict" : "disabled";
+  }
+
+  return {
+    ...instrument,
+    assetClass: preferredAssetClass,
+    priceScale: defaultPriceScale(preferredAssetClass),
+    fallbackValuation: defaultFallbackValuation(preferredAssetClass),
+    quoteSearchMode,
+  };
+}
+
+function normalizePriceScale(value?: string): PriceScale | undefined {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (normalized === "absolute" || normalized === "percent_of_par") {
+    return normalized;
+  }
+  return undefined;
+}
+
+function normalizeFallbackValuation(value?: string): FallbackValuation | undefined {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (normalized === "statement_price" || normalized === "cost_basis") {
+    return normalized;
+  }
+  return undefined;
+}
+
+function defaultPriceScale(assetClass: AssetClass): PriceScale {
+  return assetClass === "bond" ? "percent_of_par" : "absolute";
+}
+
+function defaultFallbackValuation(assetClass: AssetClass): FallbackValuation {
+  return assetClass === "private_market" ? "cost_basis" : "statement_price";
+}
+
 function inferAssetClass(description: string, instrument: string): AssetClass {
   const text = `${description} ${instrument}`.toUpperCase();
+  const sovereignBondStyle =
+    /\b(FRANKREICH|FRANCE|DEUTSCHLAND|GERMANY|BUND|ITALIEN|ITALY|SPANIEN|SPAIN|PORTUGAL|BELGIEN|BELGIUM|NIEDERLANDE|NETHERLANDS|ÖSTERREICH|AUSTRIA|TREASURY)\b/.test(
+      text,
+    ) && /\b\d{2}\/\d{2}\b/.test(text);
   if (/\bBITCOIN\b|\bETH(?:EREUM)?\b|XF000BTC0017|XF000ETH0019/.test(text)) {
     return "crypto";
   }
   if (/GOLD ETC|PHYSICAL GOLD/.test(text)) {
     return "gold";
   }
-  if (/BOND|TREASURY|ANLEIHE|CORP\.?\s*BOND|GOVT|GOVERNMENT|FIXED INCOME/.test(text)) {
-    return /ETF|UCITS|ISHARES|VANGUARD|AMUNDI/.test(text) ? "bond_etf" : "bond";
+  if (
+    /PRIVATE\s+MARKET|PRIVATE\s+EQUITY|PRIVATE\s+CREDIT|PRIVATE\s+DEBT|VENTURE\s+CAPITAL|VENTURE\b|SECONDAR(?:Y|IES)|INFRASTRUCTURE\s+FUND|ELTIF|GROWTH\s+EQUITY|BUYOUT|PRIVATE\s+ASSETS/.test(
+      text,
+    )
+  ) {
+    return "private_market";
+  }
+  if (
+    sovereignBondStyle ||
+    /BOND|BONDS|TREASURY|ANLEIHE|ANLEIHEN|CORP(?:ORATE)?\.?\s*BOND|GOVT|GOVERNMENT|FIXED INCOME|NOTE\b|NOTES\b|DEBENTURE|SCHULDVERSCHREIBUNG|RENTE\b|OBLIGATION|OBLIGATIONS/.test(
+      text,
+    )
+  ) {
+    return /ETF|UCITS|ISHARES|VANGUARD|AMUNDI/.test(text) ? "etf" : "bond";
   }
   if (/ETF|UCITS|ISHARES|VANGUARD|AMUNDI|MULTI UNITS|MSCI|NASDAQ/.test(text)) {
     return "etf";
@@ -370,6 +476,8 @@ function registryAlias(
       symbolHint: hit.symbol || undefined,
       searchQuery: hit.searchQuery || hit.isin || hit.symbol || hit.instrument || detectedIsin,
       assetClass: normalizeAssetClass(hit.assetClass),
+      priceScale: normalizePriceScale(hit.priceScale),
+      fallbackValuation: normalizeFallbackValuation(hit.fallbackValuation),
     };
   }
 
@@ -386,6 +494,8 @@ function registryAlias(
       symbolHint: hit.symbol || undefined,
       searchQuery: hit.searchQuery || hit.isin || hit.symbol || hit.instrument || candidate,
       assetClass: normalizeAssetClass(hit.assetClass),
+      priceScale: normalizePriceScale(hit.priceScale),
+      fallbackValuation: normalizeFallbackValuation(hit.fallbackValuation),
     };
   }
 
@@ -402,6 +512,16 @@ export function resolveInstrument(description: string, registry: InstrumentRegis
   const isin = alias?.isin ?? detectedIsin;
   const instrument = alias?.instrument ?? extractInstrumentName(description, detectedIsin);
   const key = registryMatch?.isin || registryMatch?.instrument || isin || instrument.toUpperCase();
+  const assetClass = alias?.assetClass ?? inferAssetClass(description, instrument);
+  const priceScale = alias?.priceScale ?? defaultPriceScale(assetClass);
+  const fallbackValuation = alias?.fallbackValuation ?? defaultFallbackValuation(assetClass);
+
+  let quoteSearchMode: QuoteSearchMode = "broad";
+  if (assetClass === "private_market") {
+    quoteSearchMode = registryMatch?.searchQuery || detectedIsin ? "strict" : "disabled";
+  } else if (assetClass === "bond") {
+    quoteSearchMode = alias?.searchQuery || detectedIsin ? "strict" : "disabled";
+  }
 
   return {
     key,
@@ -409,7 +529,10 @@ export function resolveInstrument(description: string, registry: InstrumentRegis
     instrument,
     symbolHint: alias?.symbolHint,
     searchQuery: alias?.searchQuery ?? isin ?? instrument,
-    assetClass: alias?.assetClass ?? inferAssetClass(description, instrument),
+    assetClass,
+    priceScale,
+    fallbackValuation,
+    quoteSearchMode,
   };
 }
 
@@ -428,7 +551,11 @@ export function extractInvestmentTrades(
   return transactions
     .filter((row) => row.group === "investment")
     .map((row) => {
-      const instrument = resolveInstrument(row.description, registry);
+      const preferredAssetClass = normalizeAssetClass(row.investmentAssetClass);
+      const instrument = applyPreferredAssetClass(
+        resolveInstrument(row.description, registry),
+        preferredAssetClass,
+      );
       const quantityMatch = row.description.match(QUANTITY_RE);
       return {
         rowId: row.rowId,
@@ -438,6 +565,8 @@ export function extractInvestmentTrades(
         instrumentKey: instrument.key,
         instrument: instrument.instrument,
         assetClass: instrument.assetClass,
+        priceScale: instrument.priceScale,
+        fallbackValuation: instrument.fallbackValuation,
         units: quantityMatch ? Number(quantityMatch[1]) : null,
       };
     });
@@ -462,6 +591,9 @@ export function buildQuoteUniverse(
       symbolHint: resolved.symbolHint,
       searchQuery: resolved.searchQuery || trade.instrument || trade.isin,
       assetClass: resolved.assetClass,
+      priceScale: resolved.priceScale,
+      fallbackValuation: resolved.fallbackValuation,
+      quoteSearchMode: resolved.quoteSearchMode,
     });
   }
 
@@ -485,7 +617,7 @@ export function buildPositionSnapshot(
   liveQuotes: LiveQuote[],
   endDate: string,
   historicalUnitEstimates: Record<string, HistoricalUnitEstimate> = {},
-  positionUnitOverrides: Record<string, PositionUnitOverride> = {},
+  positionUnitOverrides: PositionUnitOverridesByInstrument = {},
   registry: InstrumentRegistryLookup = {},
 ): PositionSnapshot {
   const trades = extractInvestmentTrades(transactions, registry).filter((trade) => trade.date <= endDate);
@@ -533,8 +665,11 @@ export function buildPositionSnapshot(
   }
 
   for (const [instrumentKey, bucket] of grouped.entries()) {
-    const override = positionUnitOverrides[instrumentKey];
-    if (!override || override.effectiveDate > endDate) {
+    const override = positionUnitOverrides[instrumentKey]
+      ?.filter((item) => item.effectiveDate <= endDate)
+      .sort((left, right) => `${left.effectiveDate}-${left.updatedAt}`.localeCompare(`${right.effectiveDate}-${right.updatedAt}`))
+      .at(-1);
+    if (!override) {
       continue;
     }
     bucket.units = override.units;
@@ -555,16 +690,20 @@ export function buildPositionSnapshot(
       isin: bucket.isin,
       instrument: bucket.instrument,
       assetClass: quote.assetClass,
+      priceScale: quote.priceScale,
       country: quote.country,
       industry: quote.industry,
       sector: quote.sector,
       symbol: quote.symbol,
       units: bucket.units,
+      unitsKnown: true,
       price: quote.price,
       priceEur: quote.priceEur,
       quoteCurrency: quote.currency,
       marketValueEur: bucket.units * quote.priceEur,
       asOf: quote.asOf,
+      valuationSource: "live_quote",
+      valuationAsOf: quote.asOf,
       rowsWithQuantity: bucket.rowsWithQuantity,
       rowsWithEstimatedUnits: bucket.rowsWithEstimatedUnits,
       rowsWithoutQuantity: bucket.rowsWithoutQuantity,

@@ -5,11 +5,12 @@ import { usePathname } from "next/navigation";
 import { useMemo } from "react";
 import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
-import { DatabaseZap, LayoutDashboard, List, Wallet } from "lucide-react";
+import { DatabaseZap, LayoutDashboard, List, TrendingUp, Wallet } from "lucide-react";
 import { BrandLogo } from "./brand-logo";
 
 const PRIMARY_LINKS = [
   { href: "/", label: "Cashflow", icon: LayoutDashboard },
+  { href: "/spending", label: "Trend", icon: TrendingUp },
   { href: "/portfolio", label: "Portfolio", icon: Wallet },
 ];
 
@@ -40,7 +41,7 @@ const UTILITY_GROUPS: UtilityGroup[] = [
       {
         href: "/transactions",
         label: "Transactions",
-        description: "Ledger, review queue, and fixes",
+        description: "Ledger, shared expenses, and manual entries",
         icon: List,
         activeMatch: "/transactions",
       },
@@ -63,9 +64,6 @@ export function AppFrame({ children }: { children: ReactNode }) {
     }
     if (pathname.startsWith("/load-data")) {
       return "/load-data";
-    }
-    if (pathname.startsWith("/spending")) {
-      return "/transactions";
     }
     return pathname;
   }, [pathname]);

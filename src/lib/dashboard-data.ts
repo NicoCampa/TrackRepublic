@@ -2,7 +2,17 @@ import { eachDayOfInterval, format, parseISO } from "date-fns";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { parse } from "csv-parse/sync";
-import { FIXED_COST_CATEGORIES, bucketLabel, categoryLabel, deriveCashflowBucket, deriveGroupFromCategory, groupLabel, sourceLabel } from "./category-config";
+import {
+  FIXED_COST_CATEGORIES,
+  bucketLabel,
+  categoryLabel,
+  deriveCashflowBucket,
+  deriveGroupFromCategory,
+  groupLabel,
+  normalizeCategoryKey,
+  sourceLabel,
+} from "./category-config";
+import { normalizeInvestmentAssetClass } from "./investment-asset-class";
 import {
   CONFIG_DIR,
   INSTRUMENT_REGISTRY_PATH,
@@ -13,15 +23,24 @@ import {
   loadRowOverridesSync,
   MANUAL_RULES_PATH,
   POSITION_OVERRIDES_PATH,
+  POSITION_VALUATION_OVERRIDES_PATH,
   ROW_OVERRIDES_PATH,
   type ManualTransactionRecord,
   type InstrumentRegistryEntry,
   type ManualRuleRecord,
   type RowOverrideRecord,
+  type TransactionLinkRole,
 } from "./config-store";
 import { loadOfficialEtfExposures, type OfficialEtfExposure } from "./etf-lookthrough";
-import { loadHistoricalCryptoUnitEstimates, loadLiveQuotes } from "./live-quotes";
-import type { HistoricalUnitEstimate, LiveQuote, PositionUnitOverride } from "./investment-positions";
+import { loadHistoricalUnitEstimates, loadLiveQuotes } from "./live-quotes";
+import type {
+  HistoricalUnitEstimate,
+  LiveQuote,
+  PositionUnitOverride,
+  PositionUnitOverridesByInstrument,
+  PositionValuationOverride,
+  PositionValuationOverridesByInstrument,
+} from "./investment-positions";
 import { matchesManualRule } from "./rule-matching";
 
 const ROOT = process.cwd();
@@ -30,18 +49,8 @@ const CATEGORIZED_CSV = "statement_transactions_categorized.csv";
 const CASH_CSV = "statement_transactions.csv";
 const FUND_CSV = "statement_money_market_fund.csv";
 const POSITION_OVERRIDES_CSV = "position_unit_overrides.csv";
+const POSITION_VALUATION_OVERRIDES_CSV = "position_valuation_overrides.csv";
 const LIVE_MARKET_TTL_MS = 10 * 60 * 1000;
-const GENERIC_MERCHANT_ALIASES = new Set([
-  "AI Software",
-  "Bar",
-  "Broadcast Fee",
-  "Dining",
-  "Groceries",
-  "Health",
-  "Refund",
-  "Retail",
-  "Transport",
-]);
 
 type PromiseCacheEntry<T> = {
   key: string;
@@ -75,28 +84,44 @@ function compactCounterpartyLabel(value: string): string {
     .trim();
 }
 
-function deriveDisplayMerchant(args: {
-  merchant: string;
-  description: string;
-  categoryLabel: string;
-  groupLabel: string;
-  cashflowBucketLabel: string;
-}) {
-  const merchant = normalizeWhitespace(args.merchant);
-  const description = compactCounterpartyLabel(args.description);
-  const merchantIsGeneric =
-    !merchant ||
-    merchant === "Unknown merchant" ||
-    GENERIC_MERCHANT_ALIASES.has(merchant) ||
-    merchant === args.categoryLabel ||
-    merchant === args.groupLabel ||
-    merchant === args.cashflowBucketLabel;
+function buildDisplayDescription(description: string) {
+  return compactCounterpartyLabel(description) || normalizeWhitespace(description) || "Untitled transaction";
+}
 
-  if (merchantIsGeneric && description) {
-    return description;
+function normalizeLinkRole(value: string | undefined): TransactionLinkRole {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (normalized === "net" || normalized === "member") {
+    return normalized;
   }
+  return "";
+}
 
-  return merchant || description || "Unknown merchant";
+function readLinkMetadata(row: Record<string, string>) {
+  const directGroupId = normalizeWhitespace(row.link_group_id);
+  const directRole = normalizeLinkRole(row.link_role);
+  if (directGroupId || directRole) {
+    return {
+      linkGroupId: directGroupId,
+      linkRole: directRole,
+    };
+  }
+  const legacySubcategory = normalizeWhitespace(row.subcategory);
+  if (legacySubcategory.startsWith("connected_expense_net:")) {
+    return {
+      linkGroupId: legacySubcategory.slice("connected_expense_net:".length),
+      linkRole: "net" as const,
+    };
+  }
+  if (legacySubcategory.startsWith("connected_expense_member:")) {
+    return {
+      linkGroupId: legacySubcategory.slice("connected_expense_member:".length),
+      linkRole: "member" as const,
+    };
+  }
+  return {
+    linkGroupId: "",
+    linkRole: "" as const,
+  };
 }
 
 function readCsv(name: string): Record<string, string>[] {
@@ -114,71 +139,60 @@ function readCsv(name: string): Record<string, string>[] {
 }
 
 function applyManualRuleToRow(row: TransactionRecord, matchedRule: ManualRuleRecord): TransactionRecord {
-  const nextCategory = matchedRule.category || row.category;
-  const nextGroup = matchedRule.group || deriveGroupFromCategory(nextCategory);
+  const nextCategory = normalizeCategoryKey(matchedRule.category || row.category) || row.category;
+  const nextGroup = deriveGroupFromCategory(nextCategory);
   const nextBucket = deriveCashflowBucket(nextGroup, nextCategory);
-  const nextMerchant = matchedRule.merchant || row.merchant;
   const nextGroupLabel = groupLabel(nextGroup);
   const nextCategoryLabel = categoryLabel(nextCategory);
   const nextBucketLabel = bucketLabel(nextBucket);
 
   return {
     ...row,
-    merchant: nextMerchant,
-    displayMerchant: deriveDisplayMerchant({
-      merchant: nextMerchant,
-      description: row.description,
-      categoryLabel: nextCategoryLabel,
-      groupLabel: nextGroupLabel,
-      cashflowBucketLabel: nextBucketLabel,
-    }),
     group: nextGroup,
     groupLabel: nextGroupLabel,
     category: nextCategory,
     categoryLabel: nextCategoryLabel,
-    subcategory: matchedRule.subcategory || row.subcategory,
     cashflowBucket: nextBucket,
     cashflowBucketLabel: nextBucketLabel,
-    needsReview: matchedRule.needsReview,
     isFixedCost: nextGroup === "expense" && FIXED_COST_CATEGORIES.has(nextCategory),
-    confidence: matchedRule.confidence || row.confidence,
     classificationSource: "manual_rule",
     classificationSourceLabel: sourceLabel("manual_rule"),
   };
 }
 
 function applyRowOverrideToRow(row: TransactionRecord, override: RowOverrideRecord): TransactionRecord {
-  const nextCategory = override.category || row.category;
-  const nextGroup = override.group || deriveGroupFromCategory(nextCategory);
+  const nextCategory = normalizeCategoryKey(override.category || row.category) || row.category;
+  const nextGroup = deriveGroupFromCategory(nextCategory);
   const nextBucket = deriveCashflowBucket(nextGroup, nextCategory);
-  const nextMerchant = override.merchant || row.merchant;
   const nextGroupLabel = groupLabel(nextGroup);
   const nextCategoryLabel = categoryLabel(nextCategory);
   const nextBucketLabel = bucketLabel(nextBucket);
+  const assetClassOverride = normalizeInvestmentAssetClass(override.assetClass);
+  const classifiedInvestmentAssetClass = row.classifiedInvestmentAssetClass || row.investmentAssetClass;
+  const nextSource = override.source || "row_override";
 
   return {
     ...row,
-    merchant: nextMerchant,
-    displayMerchant: deriveDisplayMerchant({
-      merchant: nextMerchant,
-      description: row.description,
-      categoryLabel: nextCategoryLabel,
-      groupLabel: nextGroupLabel,
-      cashflowBucketLabel: nextBucketLabel,
-    }),
     group: nextGroup,
     groupLabel: nextGroupLabel,
     category: nextCategory,
     categoryLabel: nextCategoryLabel,
-    subcategory: override.subcategory || row.subcategory,
     cashflowBucket: nextBucket,
     cashflowBucketLabel: nextBucketLabel,
-    needsReview: override.needsReview,
     isFixedCost: nextGroup === "expense" && FIXED_COST_CATEGORIES.has(nextCategory),
-    confidence: override.confidence || row.confidence,
-    classificationSource: override.source || "row_override",
-    classificationSourceLabel: sourceLabel(override.source || "row_override"),
+    classificationSource: nextSource,
+    classificationSourceLabel: sourceLabel(nextSource),
+    categoryOverride: normalizeCategoryKey(override.category) || "",
+    investmentAssetClass: assetClassOverride || classifiedInvestmentAssetClass,
+    classifiedInvestmentAssetClass,
+    investmentAssetClassOverride: assetClassOverride,
+    linkGroupId: override.linkGroupId || row.linkGroupId,
+    linkRole: override.linkRole || row.linkRole,
   };
+}
+
+function isDeletedTransactionOverride(override: RowOverrideRecord | undefined) {
+  return override?.source === "deleted_transaction";
 }
 
 function applyConfiguredOverrides(transactions: TransactionRecord[]): TransactionRecord[] {
@@ -188,8 +202,9 @@ function applyConfiguredOverrides(transactions: TransactionRecord[]): Transactio
     acc[row.rowId] = row;
     return acc;
   }, {});
+  const visibleTransactions = transactions.filter((row) => !isDeletedTransactionOverride(rowOverrideMap[row.rowId]));
 
-  const withRowOverrides = transactions.map((row) => {
+  const withRowOverrides = visibleTransactions.map((row) => {
     const rowOverride = rowOverrideMap[row.rowId];
     return rowOverride ? applyRowOverrideToRow(row, rowOverride) : row;
   });
@@ -200,7 +215,8 @@ function applyConfiguredOverrides(transactions: TransactionRecord[]): Transactio
   }
 
   return withRowOverrides.map((row) => {
-    if (rowOverrideMap[row.rowId]) {
+    const rowOverride = rowOverrideMap[row.rowId];
+    if (rowOverride && normalizeCategoryKey(rowOverride.category)) {
       return row;
     }
     const matchedRule = rules.find((rule) => matchesManualRule(row, rule));
@@ -217,24 +233,26 @@ export type TransactionRecord = {
   monthLabel: string;
   yearLabel: string;
   txType: string;
-  merchant: string;
-  displayMerchant: string;
   description: string;
+  displayDescription: string;
   group: string;
   groupLabel: string;
   category: string;
   categoryLabel: string;
-  subcategory: string;
   cashflowBucket: string;
   cashflowBucketLabel: string;
   signedAmount: number;
   balance: number;
-  needsReview: boolean;
   isRecurring: boolean;
   isFixedCost: boolean;
-  confidence: number;
   classificationSource: string;
   classificationSourceLabel: string;
+  categoryOverride: string;
+  investmentAssetClass: string;
+  classifiedInvestmentAssetClass: string;
+  investmentAssetClassOverride: string;
+  linkGroupId: string;
+  linkRole: TransactionLinkRole;
 };
 
 export type CashBalancePoint = {
@@ -272,7 +290,8 @@ export type DashboardData = {
   liveQuotes: LiveQuote[];
   officialEtfExposures: Record<string, OfficialEtfExposure>;
   historicalUnitEstimates: Record<string, HistoricalUnitEstimate>;
-  positionUnitOverrides: Record<string, PositionUnitOverride>;
+  positionUnitOverrides: PositionUnitOverridesByInstrument;
+  positionValuationOverrides: PositionValuationOverridesByInstrument;
   instrumentRegistry: Record<string, InstrumentRegistryEntry>;
 };
 
@@ -295,7 +314,14 @@ function buildFileSignature(filePaths: string[]) {
 }
 
 function collectConfigFilePaths() {
-  return [MANUAL_RULES_PATH, ROW_OVERRIDES_PATH, MANUAL_TRANSACTIONS_PATH, POSITION_OVERRIDES_PATH, INSTRUMENT_REGISTRY_PATH];
+  return [
+    MANUAL_RULES_PATH,
+    ROW_OVERRIDES_PATH,
+    MANUAL_TRANSACTIONS_PATH,
+    POSITION_OVERRIDES_PATH,
+    POSITION_VALUATION_OVERRIDES_PATH,
+    INSTRUMENT_REGISTRY_PATH,
+  ];
 }
 
 function collectProcessedFilePaths() {
@@ -310,7 +336,7 @@ export function getDashboardSnapshotKey() {
   return `${getBaseDashboardSnapshotKey()}:live:${currentLiveMarketWindow()}`;
 }
 
-function loadPositionUnitOverrides(): Record<string, PositionUnitOverride> {
+function loadPositionUnitOverrides(): PositionUnitOverridesByInstrument {
   try {
     const raw = readFileSync(path.join(CONFIG_DIR, POSITION_OVERRIDES_CSV), "utf8");
     const rows = parse(raw, {
@@ -319,20 +345,58 @@ function loadPositionUnitOverrides(): Record<string, PositionUnitOverride> {
       trim: true,
     }) as Record<string, string>[];
 
-    return rows.reduce<Record<string, PositionUnitOverride>>((acc, row) => {
+    return rows.reduce<PositionUnitOverridesByInstrument>((acc, row) => {
       const instrumentKey = (row.instrument_key ?? "").trim();
       const units = parseNumber(row.units);
-      if (!instrumentKey || !Number.isFinite(units) || units < 0) {
+      const effectiveDate = (row.effective_date ?? "").trim();
+      if (!instrumentKey || !Number.isFinite(units) || units < 0 || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate)) {
         return acc;
       }
-      acc[instrumentKey] = {
+      const nextOverride: PositionUnitOverride = {
         instrumentKey,
         isin: (row.isin ?? "").trim(),
         instrument: (row.instrument ?? "").trim(),
         units,
-        effectiveDate: (row.effective_date ?? "").trim(),
+        effectiveDate,
         updatedAt: (row.updated_at ?? "").trim(),
       };
+      acc[instrumentKey] = [...(acc[instrumentKey] ?? []), nextOverride].sort((left, right) =>
+        `${left.effectiveDate}-${left.updatedAt}`.localeCompare(`${right.effectiveDate}-${right.updatedAt}`),
+      );
+      return acc;
+    }, {});
+  } catch {
+    return {};
+  }
+}
+
+function loadPositionValuationOverrides(): PositionValuationOverridesByInstrument {
+  try {
+    const raw = readFileSync(path.join(CONFIG_DIR, POSITION_VALUATION_OVERRIDES_CSV), "utf8");
+    const rows = parse(raw, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+    }) as Record<string, string>[];
+
+    return rows.reduce<PositionValuationOverridesByInstrument>((acc, row) => {
+      const instrumentKey = (row.instrument_key ?? "").trim();
+      const priceEur = parseNumber(row.price_eur);
+      const effectiveDate = (row.effective_date ?? "").trim();
+      if (!instrumentKey || !Number.isFinite(priceEur) || priceEur <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate)) {
+        return acc;
+      }
+      const nextOverride: PositionValuationOverride = {
+        instrumentKey,
+        isin: (row.isin ?? "").trim(),
+        instrument: (row.instrument ?? "").trim(),
+        priceEur,
+        effectiveDate,
+        updatedAt: (row.updated_at ?? "").trim(),
+      };
+      acc[instrumentKey] = [...(acc[instrumentKey] ?? []), nextOverride].sort((left, right) =>
+        `${left.effectiveDate}-${left.updatedAt}`.localeCompare(`${right.effectiveDate}-${right.updatedAt}`),
+      );
       return acc;
     }, {});
   } catch {
@@ -343,41 +407,41 @@ function loadPositionUnitOverrides(): Record<string, PositionUnitOverride> {
 function loadTransactions(): TransactionRecord[] {
   const transactions = readCsv(CATEGORIZED_CSV)
     .map((row) => {
-      const nextGroupLabel = groupLabel(row.group);
-      const nextCategoryLabel = categoryLabel(row.category);
-      const nextBucketLabel = bucketLabel(row.cashflow_bucket);
-      const merchant = row.merchant || "Unknown merchant";
+      const category = normalizeCategoryKey(row.category) || "other";
+      const nextGroup = deriveGroupFromCategory(category);
+      const nextGroupLabel = groupLabel(nextGroup);
+      const nextCategoryLabel = categoryLabel(category);
+      const nextBucket = row.cashflow_bucket || deriveCashflowBucket(nextGroup, category);
+      const nextBucketLabel = bucketLabel(nextBucket);
       const description = row.description;
+      const link = readLinkMetadata(row);
+      const classifiedInvestmentAssetClass = normalizeInvestmentAssetClass(row.asset_class ?? "");
       return {
         rowId: row.row_id,
         date: row.date,
         monthLabel: row.month,
         yearLabel: row.year,
         txType: row.type,
-        merchant,
-        displayMerchant: deriveDisplayMerchant({
-          merchant,
-          description,
-          categoryLabel: nextCategoryLabel,
-          groupLabel: nextGroupLabel,
-          cashflowBucketLabel: nextBucketLabel,
-        }),
         description,
-        group: row.group,
+        displayDescription: buildDisplayDescription(description),
+        group: nextGroup,
         groupLabel: nextGroupLabel,
-        category: row.category,
+        category,
         categoryLabel: nextCategoryLabel,
-        subcategory: row.subcategory,
-        cashflowBucket: row.cashflow_bucket,
+        cashflowBucket: nextBucket,
         cashflowBucketLabel: nextBucketLabel,
         signedAmount: parseNumber(row.signed_amount_eur),
         balance: parseNumber(row.balance_eur),
-        needsReview: parseBoolean(row.needs_review),
         isRecurring: parseBoolean(row.is_recurring),
         isFixedCost: parseBoolean(row.is_fixed_cost),
-        confidence: parseNumber(row.confidence),
         classificationSource: row.classification_source,
         classificationSourceLabel: sourceLabel(row.classification_source),
+        categoryOverride: "",
+        investmentAssetClass: classifiedInvestmentAssetClass,
+        classifiedInvestmentAssetClass,
+        investmentAssetClassOverride: "",
+        linkGroupId: link.linkGroupId,
+        linkRole: link.linkRole,
       };
     })
     .sort((left, right) => `${left.date}-${left.rowId}`.localeCompare(`${right.date}-${right.rowId}`));
@@ -387,12 +451,12 @@ function loadTransactions(): TransactionRecord[] {
 }
 
 function manualTransactionToRow(transaction: ManualTransactionRecord): TransactionRecord {
-  const group = deriveGroupFromCategory(transaction.category);
-  const bucket = deriveCashflowBucket(group, transaction.category);
-  const merchant = transaction.merchant || "Manual entry";
-  const description = transaction.description || transaction.merchant || "Manual entry";
+  const category = normalizeCategoryKey(transaction.category) || "other";
+  const group = deriveGroupFromCategory(category);
+  const bucket = deriveCashflowBucket(group, category);
+  const description = transaction.description || "Manual entry";
   const nextGroupLabel = groupLabel(group);
-  const nextCategoryLabel = categoryLabel(transaction.category);
+  const nextCategoryLabel = categoryLabel(category);
   const nextBucketLabel = bucketLabel(bucket);
   return {
     rowId: transaction.rowId,
@@ -400,30 +464,26 @@ function manualTransactionToRow(transaction: ManualTransactionRecord): Transacti
     monthLabel: transaction.date.slice(0, 7),
     yearLabel: transaction.date.slice(0, 4),
     txType: transaction.transactionType || "Manual",
-    merchant,
-    displayMerchant: deriveDisplayMerchant({
-      merchant,
-      description,
-      categoryLabel: nextCategoryLabel,
-      groupLabel: nextGroupLabel,
-      cashflowBucketLabel: nextBucketLabel,
-    }),
     description,
+    displayDescription: buildDisplayDescription(description),
     group,
     groupLabel: nextGroupLabel,
-    category: transaction.category,
+    category,
     categoryLabel: nextCategoryLabel,
-    subcategory: transaction.subcategory || "manual_entry",
     cashflowBucket: bucket,
     cashflowBucketLabel: nextBucketLabel,
     signedAmount: transaction.signedAmount,
     balance: 0,
-    needsReview: false,
     isRecurring: false,
-    isFixedCost: group === "expense" && FIXED_COST_CATEGORIES.has(transaction.category),
-    confidence: 0.99,
+    isFixedCost: group === "expense" && FIXED_COST_CATEGORIES.has(category),
     classificationSource: "manual_entry",
     classificationSourceLabel: sourceLabel("manual_entry"),
+    categoryOverride: "",
+    investmentAssetClass: "",
+    classifiedInvestmentAssetClass: "",
+    investmentAssetClassOverride: "",
+    linkGroupId: transaction.linkGroupId,
+    linkRole: transaction.linkRole,
   };
 }
 
@@ -472,18 +532,30 @@ function mergeManualTransactions(
 }
 
 function loadCashBalances(manualTransactions: ManualTransactionRecord[] = []): CashBalancePoint[] {
+  const deletedRowIds = new Set(
+    loadRowOverridesSync()
+      .filter((item) => item.source === "deleted_transaction")
+      .map((item) => item.rowId),
+  );
   const rows = readCsv(CASH_CSV).sort((left, right) => `${left.date}-${left.row_id}`.localeCompare(`${right.date}-${right.row_id}`));
   const byDate = new Map<string, CashBalancePoint>();
+  let deletedDelta = 0;
 
   for (const row of rows) {
+    const signedAmount = parseNumber(row.signed_amount_eur);
+    if (deletedRowIds.has(row.row_id)) {
+      deletedDelta += signedAmount;
+      continue;
+    }
+
     const date = row.date;
     const existing = byDate.get(date) ?? {
       date,
       cashBalance: 0,
       cashChange: 0,
     };
-    existing.cashBalance = parseNumber(row.balance_eur);
-    existing.cashChange += parseNumber(row.signed_amount_eur);
+    existing.cashBalance = parseNumber(row.balance_eur) - deletedDelta;
+    existing.cashChange += signedAmount;
     byDate.set(date, existing);
   }
 
@@ -631,6 +703,7 @@ async function buildBaseDashboardData(): Promise<BaseDashboardData> {
   const fundRows = loadFundRows();
   const capitalSeries = buildCapitalSeries(cashBalances, fundRows, transactions);
   const positionUnitOverrides = loadPositionUnitOverrides();
+  const positionValuationOverrides = loadPositionValuationOverrides();
   const instrumentRegistry = loadInstrumentRegistrySync();
 
   return {
@@ -639,6 +712,7 @@ async function buildBaseDashboardData(): Promise<BaseDashboardData> {
     fundRows,
     capitalSeries,
     positionUnitOverrides,
+    positionValuationOverrides,
     instrumentRegistry,
   };
 }
@@ -671,11 +745,11 @@ export async function loadDashboardData(): Promise<DashboardData> {
   const promise = Promise.resolve()
     .then(async () => {
       const baseData = await loadBaseDashboardData();
-  const [liveQuotes, officialEtfExposures, historicalUnitEstimates] = await Promise.all([
-        loadLiveQuotes(baseData.transactions, baseData.instrumentRegistry),
+      const liveQuotes = await loadLiveQuotes(baseData.transactions, baseData.instrumentRegistry);
+      const [officialEtfExposures, historicalUnitEstimates] = await Promise.all([
         loadOfficialEtfExposures(baseData.transactions, baseData.instrumentRegistry),
-        loadHistoricalCryptoUnitEstimates(baseData.transactions, baseData.instrumentRegistry),
-  ]);
+        loadHistoricalUnitEstimates(baseData.transactions, liveQuotes, baseData.instrumentRegistry),
+      ]);
 
       return {
         ...baseData,

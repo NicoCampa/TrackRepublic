@@ -2,9 +2,12 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "csv-parse/sync";
 import { NextResponse } from "next/server";
-import { POSITION_OVERRIDES_PATH, POSITION_UNIT_OVERRIDE_COLUMNS } from "@/lib/config-store";
+import {
+  POSITION_VALUATION_OVERRIDE_COLUMNS,
+  POSITION_VALUATION_OVERRIDES_PATH,
+} from "@/lib/config-store";
 
-type OverrideColumn = (typeof POSITION_UNIT_OVERRIDE_COLUMNS)[number];
+type OverrideColumn = (typeof POSITION_VALUATION_OVERRIDE_COLUMNS)[number];
 type OverrideRow = Record<OverrideColumn, string>;
 
 function csvEscape(value: string) {
@@ -16,7 +19,7 @@ function csvEscape(value: string) {
 
 async function readOverrides(): Promise<OverrideRow[]> {
   try {
-    const raw = await readFile(POSITION_OVERRIDES_PATH, "utf8");
+    const raw = await readFile(POSITION_VALUATION_OVERRIDES_PATH, "utf8");
     return parse(raw, {
       columns: true,
       skip_empty_lines: true,
@@ -29,11 +32,11 @@ async function readOverrides(): Promise<OverrideRow[]> {
 
 async function writeOverrides(rows: OverrideRow[]) {
   const lines = [
-    POSITION_UNIT_OVERRIDE_COLUMNS.join(","),
-    ...rows.map((row) => POSITION_UNIT_OVERRIDE_COLUMNS.map((column) => csvEscape(row[column] ?? "")).join(",")),
+    POSITION_VALUATION_OVERRIDE_COLUMNS.join(","),
+    ...rows.map((row) => POSITION_VALUATION_OVERRIDE_COLUMNS.map((column) => csvEscape(row[column] ?? "")).join(",")),
   ];
-  await mkdir(path.dirname(POSITION_OVERRIDES_PATH), { recursive: true });
-  await writeFile(POSITION_OVERRIDES_PATH, `${lines.join("\n")}\n`, "utf8");
+  await mkdir(path.dirname(POSITION_VALUATION_OVERRIDES_PATH), { recursive: true });
+  await writeFile(POSITION_VALUATION_OVERRIDES_PATH, `${lines.join("\n")}\n`, "utf8");
 }
 
 export async function POST(request: Request) {
@@ -41,25 +44,25 @@ export async function POST(request: Request) {
     instrumentKey?: string;
     isin?: string;
     instrument?: string;
-    units?: number;
+    priceEur?: number;
     effectiveDate?: string;
   };
 
   const instrumentKey = (body.instrumentKey ?? "").trim();
   const isin = (body.isin ?? "").trim();
   const instrument = (body.instrument ?? "").trim();
-  const units = Number(body.units ?? Number.NaN);
+  const priceEur = Number(body.priceEur ?? Number.NaN);
   const effectiveDate = (body.effectiveDate ?? "").trim();
 
-  if (!instrumentKey || !instrument || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate) || !Number.isFinite(units) || units < 0) {
-    return NextResponse.json({ message: "Invalid position units change request." }, { status: 400 });
+  if (!instrumentKey || !instrument || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate) || !Number.isFinite(priceEur) || priceEur <= 0) {
+    return NextResponse.json({ message: "Invalid position valuation change request." }, { status: 400 });
   }
 
   const nextRow: OverrideRow = {
     instrument_key: instrumentKey,
     isin,
     instrument,
-    units: units.toString(),
+    price_eur: priceEur.toString(),
     effective_date: effectiveDate,
     updated_at: new Date().toISOString(),
   };
@@ -86,7 +89,7 @@ export async function POST(request: Request) {
     ok: true,
     instrumentKey,
     instrument,
-    units,
+    priceEur,
     effectiveDate,
   });
 }

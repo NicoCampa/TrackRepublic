@@ -8,7 +8,7 @@ const standaloneStaticRoot = path.join(standaloneRoot, ".next", "static");
 const builtStaticRoot = path.join(nextRoot, "static");
 const publicRoot = path.join(repoRoot, "public");
 const standalonePublicRoot = path.join(standaloneRoot, "public");
-const placeholderRoot = path.join(repoRoot, "src-tauri-placeholder");
+const bootstrapRoot = path.join(repoRoot, "src-tauri-bootstrap");
 const desktopRuntimeRoot = path.join(repoRoot, "desktop-runtime");
 const appRuntimeRoot = path.join(desktopRuntimeRoot, "app-runtime");
 const defaultsRoot = path.join(desktopRuntimeRoot, "defaults");
@@ -38,12 +38,7 @@ const MANUAL_RULE_COLUMNS = [
   "pattern",
   "transaction_type",
   "amount_sign",
-  "merchant",
-  "group",
   "category",
-  "subcategory",
-  "confidence",
-  "needs_review",
 ];
 
 const ROW_OVERRIDE_COLUMNS = [
@@ -51,13 +46,10 @@ const ROW_OVERRIDE_COLUMNS = [
   "description",
   "transaction_type",
   "signed_amount",
-  "merchant",
-  "group",
   "category",
-  "subcategory",
-  "confidence",
-  "needs_review",
   "source",
+  "link_group_id",
+  "link_role",
   "updated_at",
 ];
 
@@ -65,11 +57,11 @@ const MANUAL_TRANSACTION_COLUMNS = [
   "row_id",
   "date",
   "transaction_type",
-  "merchant",
   "description",
   "signed_amount",
   "category",
-  "subcategory",
+  "link_group_id",
+  "link_role",
   "updated_at",
 ];
 
@@ -78,6 +70,15 @@ const POSITION_OVERRIDE_COLUMNS = [
   "isin",
   "instrument",
   "units",
+  "effective_date",
+  "updated_at",
+];
+
+const POSITION_VALUATION_OVERRIDE_COLUMNS = [
+  "instrument_key",
+  "isin",
+  "instrument",
+  "price_eur",
   "effective_date",
   "updated_at",
 ];
@@ -146,6 +147,7 @@ async function main() {
   await rm(path.join(appRuntimeRoot, "desktop-runtime"), { recursive: true, force: true });
   await rm(path.join(appRuntimeRoot, "src-tauri"), { recursive: true, force: true });
   await rm(path.join(appRuntimeRoot, "src-tauri-placeholder"), { recursive: true, force: true });
+  await rm(path.join(appRuntimeRoot, "src-tauri-bootstrap"), { recursive: true, force: true });
 
   await mkdir(defaultsConfigRoot, { recursive: true });
   await mkdir(defaultsNodeModulesRoot, { recursive: true });
@@ -154,10 +156,19 @@ async function main() {
   await mkdir(path.join(defaultsRoot, "data", "processed"), { recursive: true });
 
   await cp(path.join(repoRoot, "config", "instrument_registry.csv"), path.join(defaultsConfigRoot, "instrument_registry.csv"));
+  await cp(
+    path.join(repoRoot, "config", "classifier_prompt_template.txt"),
+    path.join(defaultsConfigRoot, "classifier_prompt_template.txt"),
+  );
+  await cp(
+    path.join(repoRoot, "config", "investment_asset_class_prompt_template.txt"),
+    path.join(defaultsConfigRoot, "investment_asset_class_prompt_template.txt"),
+  );
   await writeCsvHeader(path.join(defaultsConfigRoot, "manual_category_rules.csv"), MANUAL_RULE_COLUMNS);
   await writeCsvHeader(path.join(defaultsConfigRoot, "transaction_overrides.csv"), ROW_OVERRIDE_COLUMNS);
   await writeCsvHeader(path.join(defaultsConfigRoot, "manual_transactions.csv"), MANUAL_TRANSACTION_COLUMNS);
   await writeCsvHeader(path.join(defaultsConfigRoot, "position_unit_overrides.csv"), POSITION_OVERRIDE_COLUMNS);
+  await writeCsvHeader(path.join(defaultsConfigRoot, "position_valuation_overrides.csv"), POSITION_VALUATION_OVERRIDE_COLUMNS);
 
   for (const scriptName of SAFE_SCRIPT_NAMES) {
     await cp(path.join(repoRoot, "scripts", scriptName), path.join(defaultsScriptsRoot, scriptName));
@@ -167,9 +178,9 @@ async function main() {
     await copyNodePackage(packageName);
   }
 
-  await mkdir(placeholderRoot, { recursive: true });
+  await mkdir(bootstrapRoot, { recursive: true });
   await writeFile(
-    path.join(placeholderRoot, "index.html"),
+    path.join(bootstrapRoot, "index.html"),
     `<!doctype html>
 <html lang="en">
   <head>
@@ -177,46 +188,223 @@ async function main() {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Track Republic</title>
     <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0f15;
+        --bg-soft: rgba(17, 23, 33, 0.82);
+        --panel: rgba(17, 23, 33, 0.78);
+        --panel-border: rgba(173, 191, 214, 0.14);
+        --text: #f4f7fb;
+        --muted: #93a0b1;
+        --accent: #52a7ff;
+        --accent-soft: rgba(82, 167, 255, 0.18);
+        --accent-2: #7ee0c3;
+      }
       html, body {
         margin: 0;
+        width: 100%;
         min-height: 100%;
-        background: #0f131a;
-        color: #f4f7fb;
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+        background:
+          radial-gradient(circle at 18% 18%, rgba(82, 167, 255, 0.16), transparent 28%),
+          radial-gradient(circle at 78% 12%, rgba(126, 224, 195, 0.10), transparent 24%),
+          radial-gradient(circle at 50% 100%, rgba(82, 167, 255, 0.08), transparent 36%),
+          var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", sans-serif;
       }
       body {
+        position: relative;
+        overflow: hidden;
+      }
+
+      body::before {
+        content: "";
+        position: absolute;
+        inset: 24px;
+        border: 1px solid rgba(173, 191, 214, 0.06);
+        pointer-events: none;
+      }
+
+      .scene {
+        min-height: 100vh;
         display: grid;
         place-items: center;
+        padding: 40px 24px;
       }
+
       .shell {
+        width: min(560px, 100%);
         display: grid;
-        gap: 12px;
+        justify-items: center;
+        gap: 18px;
         text-align: center;
-        padding: 24px;
       }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 14px;
+        padding: 10px 14px 10px 10px;
+        border: 1px solid var(--panel-border);
+        background: linear-gradient(180deg, rgba(17, 23, 33, 0.86), rgba(11, 15, 21, 0.88));
+        box-shadow: 0 20px 40px -34px rgba(0, 0, 0, 0.85);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+      }
+
+      .brand-mark {
+        width: 48px;
+        height: 48px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(173, 191, 214, 0.16);
+        background:
+          linear-gradient(180deg, rgba(82, 167, 255, 0.08), rgba(82, 167, 255, 0.02)),
+          rgba(11, 15, 21, 0.92);
+      }
+
+      .brand-copy {
+        display: grid;
+        gap: 2px;
+        text-align: left;
+      }
+
+      .brand-copy strong {
+        font-size: 18px;
+        line-height: 1;
+        letter-spacing: -0.04em;
+      }
+
+      .brand-copy span {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
       .kicker {
         font-size: 11px;
         font-weight: 700;
-        letter-spacing: 0.18em;
+        letter-spacing: 0.24em;
         text-transform: uppercase;
-        color: #37d4ff;
+        color: var(--accent);
       }
+
       h1 {
         margin: 0;
-        font-size: 32px;
-        line-height: 1;
+        font-size: clamp(34px, 4.8vw, 52px);
+        line-height: 0.96;
+        letter-spacing: -0.06em;
       }
+
       p {
         margin: 0;
-        color: #97a1af;
+        max-width: 34ch;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.5;
+      }
+
+      .status {
+        width: min(320px, 100%);
+        display: grid;
+        gap: 10px;
+        justify-items: center;
+      }
+
+      .status-line {
+        position: relative;
+        width: 100%;
+        height: 6px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(173, 191, 214, 0.10);
+      }
+
+      .status-line::before {
+        content: "";
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 34%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--accent), var(--accent-2));
+        box-shadow: 0 0 18px rgba(82, 167, 255, 0.34);
+        animation: loading-slide 1.4s ease-in-out infinite;
+      }
+
+      .status-note {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      @keyframes loading-slide {
+        0% {
+          transform: translateX(-120%);
+        }
+        50% {
+          transform: translateX(125%);
+        }
+        100% {
+          transform: translateX(320%);
+        }
+      }
+
+      @media (max-width: 720px) {
+        body::before {
+          inset: 14px;
+        }
+
+        .scene {
+          padding: 24px;
+        }
+
+        .brand {
+          padding-inline: 10px 12px;
+        }
+
+        .brand-mark {
+          width: 42px;
+          height: 42px;
+        }
+
+        .brand-copy strong {
+          font-size: 16px;
+        }
+
+        p {
+          font-size: 14px;
+        }
       }
     </style>
   </head>
   <body>
-    <main class="shell">
-      <div class="kicker">Track Republic</div>
-      <h1>Starting desktop app…</h1>
-      <p>Launching the local production server.</p>
+    <main class="scene">
+      <section class="shell" aria-live="polite">
+        <div class="brand" aria-label="Track Republic">
+          <div class="brand-mark" aria-hidden="true">
+            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M4 22H24" stroke="rgba(173,191,214,0.35)" stroke-width="1.5" stroke-linecap="round"/>
+              <path d="M6 18.5L11 14L15 16.5L21.5 8" stroke="#7EE0C3" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="21.5" cy="8" r="2" fill="#52A7FF"/>
+            </svg>
+          </div>
+          <div class="brand-copy">
+            <strong>Track Republic</strong>
+            <span>Desktop</span>
+          </div>
+        </div>
+        <div class="kicker">Launching workspace</div>
+        <h1>Starting desktop app…</h1>
+        <p>Preparing the local app server and opening your workspace.</p>
+        <div class="status">
+          <div class="status-line" aria-hidden="true"></div>
+          <div class="status-note">Local server booting</div>
+        </div>
+      </section>
     </main>
   </body>
 </html>`,

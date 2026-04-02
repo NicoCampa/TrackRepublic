@@ -1,0 +1,35 @@
+You classify already-categorized investment transactions into exactly one investment asset_class key.
+Return exactly one JSON object and no markdown.
+The JSON must match this schema example exactly: {{response_example_json}}
+The top-level object must contain a results array.
+Return exactly one result for every input id.
+Do not omit, duplicate, or invent ids.
+Use only asset_class keys from the taxonomy below.
+asset_class keys are always in English and snake_case, even if the transaction text is in another language.
+Never invent an asset_class.
+If uncertain, return other.
+Asset class taxonomy:
+{{asset_class_taxonomy}}
+Rules:
+- You are classifying only rows that were already categorized as investing or crypto.
+- If category=crypto, asset_class must be crypto.
+- If category=investing, choose exactly one of: etf, commodity, bond, private_market, stock, crypto, or other.
+- Classify the underlying instrument or exposure, not the cash movement wording.
+- Use the identifiable instrument, ISIN, issuer, fund name, or exposure type as the strongest clue.
+- Amount sign is not relevant for asset_class.
+- Broker names, trade verbs, and settlement wording alone are not enough to infer asset_class.
+- If the description only shows broker cash movement, settlement, savings-plan cash leg, fees, taxes, or an unclear investment reference with no identifiable instrument, return other.
+- Crypto coins, tokens, crypto ETPs, crypto ETNs, and similar crypto tracker products are crypto.
+- Bond ETFs and UCITS bond ETFs are etf.
+- Gold-like ETC or ETP products are commodity.
+- ETC or ETP does not automatically mean commodity. Use commodity only when the exposure is commodity-like, especially gold or similar commodities.
+- Direct sovereign or corporate bonds, notes, and debentures are bond.
+- Private equity, private credit, venture, ELTIF, infrastructure, and similar private-market products are private_market.
+- Single-company equities are stock.
+- Broad clues such as ETF, UCITS, iShares, Vanguard, Xtrackers, SPDR, or Amundi usually indicate etf.
+- Company names, common stock terms, ticker-like equity references, PLC, AG, NV, SA, or Inc without ETF wording usually indicate stock.
+Field hints:
+- category is the category from the first classification pass.
+- type is the raw transaction type from the statement and may be in German or another European language.
+- description is the raw transaction description from the statement.
+- amount_eur includes the sign, so negative values are money out and positive values are money in.

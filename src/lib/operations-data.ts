@@ -1,5 +1,14 @@
 import { existsSync, statSync } from "node:fs";
-import { CATEGORY_CACHE_PATH, PIPELINE_SUMMARY_PATH, loadPipelineSummarySync, type PipelineSummary } from "./config-store";
+import {
+  CATEGORY_CACHE_PATH,
+  CLASSIFIER_PROMPT_TEMPLATE_PATH,
+  INVESTMENT_ASSET_CLASS_PROMPT_TEMPLATE_PATH,
+  PIPELINE_SUMMARY_PATH,
+  loadClassifierPromptTemplateSync,
+  loadInvestmentAssetClassPromptTemplateSync,
+  loadPipelineSummarySync,
+  type PipelineSummary,
+} from "./config-store";
 import { getBaseDashboardSnapshotKey, loadBaseDashboardData } from "./dashboard-data";
 import { readPipelineSnapshot, type PipelineJob } from "./pipeline-jobs";
 
@@ -8,6 +17,9 @@ export type OperationsData = {
   pipelineSummary: PipelineSummary | null;
   cache: Awaited<ReturnType<typeof readPipelineSnapshot>>["cache"];
   latestJob: PipelineJob | null;
+  availableModels: Awaited<ReturnType<typeof readPipelineSnapshot>>["availableModels"];
+  classifierPromptTemplate: string;
+  investmentAssetClassPromptTemplate: string;
 };
 
 type PromiseCacheEntry<T> = {
@@ -18,7 +30,12 @@ type PromiseCacheEntry<T> = {
 let operationsDataCache: PromiseCacheEntry<OperationsData> | null = null;
 
 function buildOperationsSnapshotKey() {
-  const files = [CATEGORY_CACHE_PATH, PIPELINE_SUMMARY_PATH];
+  const files = [
+    CATEGORY_CACHE_PATH,
+    PIPELINE_SUMMARY_PATH,
+    CLASSIFIER_PROMPT_TEMPLATE_PATH,
+    INVESTMENT_ASSET_CLASS_PROMPT_TEMPLATE_PATH,
+  ];
   return files
     .map((filePath) => {
       if (!existsSync(filePath)) {
@@ -48,6 +65,9 @@ export async function loadOperationsData(): Promise<OperationsData> {
         pipelineSummary: snapshot.summary ?? loadPipelineSummarySync(),
         cache: snapshot.cache,
         latestJob: snapshot.latestJob,
+        availableModels: snapshot.availableModels,
+        classifierPromptTemplate: loadClassifierPromptTemplateSync(),
+        investmentAssetClassPromptTemplate: loadInvestmentAssetClassPromptTemplateSync(),
       };
     })
     .catch((error) => {

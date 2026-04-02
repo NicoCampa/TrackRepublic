@@ -33,15 +33,16 @@ import {
 import { buildInvestmentAnalytics } from "@/lib/investment-performance";
 import type { OfficialEtfExposure } from "@/lib/etf-lookthrough";
 import type { DetailView } from "./dashboard-ui";
-import { CategoryEditor, ChartTooltipContent, ClickableMetricGrid, DashboardShell, DataTable, DetailSheet, FilterBar, PageToolbar, Panel, PositionUnitsEditor, Section, SignedAmount, defaultFilterState } from "./dashboard-ui";
+import { CategoryEditor, ChartTooltipContent, ClickableMetricGrid, DashboardShell, DataTable, DetailSheet, FilterBar, PageToolbar, Panel, PositionHoldingEditor, Section, SignedAmount, defaultFilterState } from "./dashboard-ui";
 
 const ASSET_CLASS_LABELS: Record<string, string> = {
   crypto: "Crypto",
   etf: "ETFs",
-  bond_etf: "Bond ETFs",
-  gold: "Gold",
+  bond_etf: "ETFs",
+  gold: "Commodity",
   stock: "Stocks",
   bond: "Bonds",
+  private_market: "Private markets",
   other: "Other",
 };
 
@@ -151,6 +152,7 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
         rangeStartDate: filters.startDate,
         historicalUnitEstimates: data.historicalUnitEstimates,
         positionUnitOverrides: data.positionUnitOverrides,
+        positionValuationOverrides: data.positionValuationOverrides,
         registry: data.instrumentRegistry,
       }),
     [
@@ -160,6 +162,7 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
       data.instrumentRegistry,
       data.liveQuotes,
       data.positionUnitOverrides,
+      data.positionValuationOverrides,
       data.transactions,
       filters.endDate,
       filters.startDate,
@@ -174,7 +177,9 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
   const pricesAsOfLabel = formatAsOfDate(analytics.snapshot.pricesAsOf.slice(0, 10) || analytics.snapshot.positionsAsOf);
   const partialMonths = incompleteMonthLabels(filters);
   const accountValueEur = analytics.snapshot.availableCash + analytics.portfolioValueEur;
-  const manualPositions = analytics.positions.filter((row) => row.coverage === "Manual").length;
+  const manualPositions = analytics.positions.filter(
+    (row) => row.coverage === "Manual" || row.valuationSource === "manual_price",
+  ).length;
   const estimatedOrPartialPositions = analytics.positions.filter((row) => row.coverage === "Estimated" || row.coverage === "Partial").length;
   const accountMovementRows = monthlyAccountMovements(transactionRows).map((row) => ({
     ...row,
@@ -220,16 +225,24 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
         .map((row) => ({
           rowId: row.rowId,
           date: formatDisplayDate(row.date),
-          merchant: row.displayMerchant,
+          description: row.description,
+          displayDescription: row.displayDescription,
+          txType: row.txType,
+          groupKey: row.group,
           category: row.categoryLabel,
           categoryKey: row.category,
           categoryLabel: row.categoryLabel,
+          categoryOverride: row.categoryOverride,
+          investmentAssetClass: row.investmentAssetClass,
+          classifiedInvestmentAssetClass: row.classifiedInvestmentAssetClass,
+          investmentAssetClassOverride: row.investmentAssetClassOverride,
           amount: row.signedAmount,
+          signedAmount: row.signedAmount,
           balance: row.balance,
         })),
       columns: [
         { key: "date", label: "Date" },
-        { key: "merchant", label: "Merchant" },
+        { key: "displayDescription", label: "Details" },
         { key: "category", label: "Category", render: (_value, row) => <CategoryEditor row={row} /> },
         { key: "amount", label: "Amount", render: (value) => <SignedAmount value={Number(value)} /> },
         { key: "balance", label: "Balance", render: (value) => <span>{formatEuro(Number(value))}</span> },
@@ -252,7 +265,12 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
         instrument: row.instrument,
         assetClass: ASSET_CLASS_LABELS[row.assetClass] ?? row.assetClass,
         units: row.units,
+        unitsKnown: row.unitsKnown,
         effectiveDate: analytics.snapshot.positionsAsOf,
+        priceEur: row.priceEur,
+        priceScale: row.priceScale,
+        valuationSource: row.valuationSource,
+        valuationSourceLabel: row.valuationSourceLabel,
         costBasis: row.costBasisEur,
         value: row.marketValueEur,
         unrealized: row.unrealizedPnlEur,
@@ -262,9 +280,18 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
         coverage: row.coverage,
       })),
       columns: [
-        { key: "instrument", label: "Asset" },
+        {
+          key: "instrument",
+          label: "Asset",
+          render: (_value, row) => (
+            <div className="table-transaction-cell">
+              <strong>{String(row.instrument)}</strong>
+              <small>{`${String(row.assetClass)} · ${String(row.valuationSourceLabel ?? row.valuationSource ?? "Current")}`}</small>
+            </div>
+          ),
+        },
         { key: "assetClass", label: "Class" },
-        { key: "units", label: "Units", render: (_value, row) => <PositionUnitsEditor row={row} /> },
+        { key: "units", label: "Units", render: (value, row) => <span>{row.unitsKnown ? Number(value).toLocaleString("en-US", { maximumFractionDigits: 6 }) : "—"}</span> },
         { key: "costBasis", label: "Cost basis", render: (value) => <span>{formatEuro(Number(value))}</span> },
         { key: "value", label: "Market value", render: (value) => <span>{formatEuro(Number(value))}</span> },
         { key: "unrealized", label: "Unrealized", render: (value) => <SignedAmount value={Number(value)} /> },
@@ -272,6 +299,7 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
         { key: "dividends", label: "Dividends", render: (value) => <SignedAmount value={Number(value)} /> },
         { key: "returnPct", label: "Return %", render: (value) => <span>{formatPercent(Number(value))}</span> },
         { key: "coverage", label: "Coverage" },
+        { key: "priceEur", label: "Adjust", render: (_value, row) => <PositionHoldingEditor row={row} /> },
       ],
     });
   };
@@ -438,7 +466,12 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
               instrument: row.instrument,
               assetClass: ASSET_CLASS_LABELS[row.assetClass] ?? row.assetClass,
               units: row.units,
+              unitsKnown: row.unitsKnown,
               effectiveDate: analytics.snapshot.positionsAsOf,
+              priceEur: row.priceEur,
+              priceScale: row.priceScale,
+              valuationSource: row.valuationSource,
+              valuationSourceLabel: row.valuationSourceLabel,
               costBasis: row.costBasisEur,
               value: row.marketValueEur,
               unrealized: row.unrealizedPnlEur,
@@ -448,9 +481,18 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
               coverage: row.coverage,
             }))}
             columns={[
-              { key: "instrument", label: "Asset" },
+              {
+                key: "instrument",
+                label: "Asset",
+                render: (_value, row) => (
+                  <div className="table-transaction-cell">
+                    <strong>{String(row.instrument)}</strong>
+                    <small>{`${String(row.assetClass)} · ${String(row.valuationSourceLabel ?? row.valuationSource ?? "Current")}`}</small>
+                  </div>
+                ),
+              },
               { key: "assetClass", label: "Class" },
-              { key: "units", label: "Units", align: "right", cellClassName: "cell-nowrap", render: (_value, row) => <PositionUnitsEditor row={row} /> },
+              { key: "units", label: "Units", align: "right", cellClassName: "cell-nowrap", render: (value, row) => <span>{row.unitsKnown ? Number(value).toLocaleString("en-US", { maximumFractionDigits: 6 }) : "—"}</span> },
               { key: "costBasis", label: "Cost basis", align: "right", cellClassName: "cell-nowrap", render: (value) => <span>{formatEuro(Number(value))}</span> },
               { key: "value", label: "Market value", align: "right", cellClassName: "cell-nowrap", render: (value) => <span>{formatEuro(Number(value))}</span> },
               { key: "unrealized", label: "Unrealized", align: "right", cellClassName: "cell-nowrap", render: (value) => <SignedAmount value={Number(value)} /> },
@@ -458,6 +500,7 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
               { key: "dividends", label: "Dividends", align: "right", cellClassName: "cell-nowrap", render: (value) => <SignedAmount value={Number(value)} /> },
               { key: "returnPct", label: "Return %", align: "right", cellClassName: "cell-nowrap", render: (value) => <span>{formatPercent(Number(value))}</span> },
               { key: "coverage", label: "Coverage", cellClassName: "cell-nowrap" },
+              { key: "priceEur", label: "Adjust", cellClassName: "cell-nowrap", render: (_value, row) => <PositionHoldingEditor row={row} /> },
             ]}
           />
         </Panel>
@@ -465,7 +508,7 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
 
       <Section title="Exposure" note="What the current portfolio is made of.">
         <div className="panel-grid panel-grid-three">
-          <Panel title="Portfolio mix" note="Current market value by asset class, including bond support.">
+          <Panel title="Portfolio mix" note="Current market value by asset class, including bonds and private markets.">
             <div className="breakdown-list">
               {portfolioMix.map((entry) => (
                 <button
@@ -645,19 +688,26 @@ export function AccountsDashboard({ data }: { data: AccountsData }) {
                 .map((row) => ({
                   rowId: row.rowId,
                   date: formatDisplayDate(row.date),
-                  merchant: row.displayMerchant,
+                  description: row.description,
+                  displayDescription: row.displayDescription,
+                  txType: row.txType,
+                  groupKey: row.group,
                   category: row.categoryLabel,
                   categoryKey: row.category,
                   categoryLabel: row.categoryLabel,
+                  categoryOverride: row.categoryOverride,
+                  investmentAssetClass: row.investmentAssetClass,
+                  classifiedInvestmentAssetClass: row.classifiedInvestmentAssetClass,
+                  investmentAssetClassOverride: row.investmentAssetClassOverride,
                   amount: row.signedAmount,
-                  description: row.description,
+                  signedAmount: row.signedAmount,
                 }))}
               columns={[
                 { key: "date", label: "Date", cellClassName: "cell-nowrap" },
-                { key: "merchant", label: "Merchant" },
+                { key: "displayDescription", label: "Details", cellClassName: "cell-description" },
                 { key: "category", label: "Category", render: (_value, row) => <CategoryEditor row={row} /> },
                 { key: "amount", label: "Amount", align: "right", cellClassName: "cell-nowrap", render: (value) => <SignedAmount value={Number(value)} /> },
-                { key: "description", label: "Description", cellClassName: "cell-description" },
+                { key: "description", label: "Raw description", cellClassName: "cell-description" },
               ]}
             />
           </details>

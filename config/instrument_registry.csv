@@ -1,19 +1,19 @@
-key,isin,symbol,instrument,asset_class,country,sector,industry,lookthrough_provider,search_query
-IE00BK5BQT80,IE00BK5BQT80,IE00BK5BQT80.SG,Vanguard FTSE All-World UCITS ETF,etf,Global,Global equities,Global equity ETF,vanguard_all_world,IE00BK5BQT80
-IE00B4ND3602,IE00B4ND3602,SGLN.MI,iShares Physical Gold ETC,gold,Global,Commodities,Gold,,iShares Physical Gold ETC
-LU0908500753,LU0908500753,MEUD.PA,Amundi Core Stoxx Europe 600 UCITS ETF Acc,etf,Europe,European equities,Europe equity ETF,amundi_stoxx_europe_600,LU0908500753
-IE00B5BMR087,IE00B5BMR087,SXR8.DE,iShares Core S&P 500 UCITS ETF USD (Acc),etf,United States,US equities,US equity ETF,ishares_core_sp500,IE00B5BMR087
-IE00B4L5Y983,IE00B4L5Y983,EUNL.DE,iShares Core MSCI World UCITS ETF USD (Acc),etf,Global,Global equities,Global equity ETF,ishares_core_msci_world,IE00B4L5Y983
-IE00B53SZB19,IE00B53SZB19,CNDX.L,iShares Nasdaq 100 UCITS ETF USD (Acc),etf,United States,US growth equities,Nasdaq 100 ETF,ishares_nasdaq_100,IE00B53SZB19
-IE00B3WJKG14,IE00B3WJKG14,IUIT.L,iShares S&P 500 Information Technology Sector UCITS ETF USD (Acc),etf,United States,Technology,US technology ETF,ishares_sp500_info_tech,IE00B3WJKG14
-LU1900066033,LU1900066033,,Amundi MSCI Europe ESG Screened UCITS ETF,etf,Europe,European equities,Europe ESG ETF,,LU1900066033
-XF000BTC0017,XF000BTC0017,BTC-USD,Bitcoin,crypto,Digital assets,Crypto,Crypto,,Bitcoin
-XF000ETH0019,XF000ETH0019,ETH-USD,Ethereum,crypto,Digital assets,Crypto,Crypto,,Ethereum
-US0378331005,US0378331005,AAPL,Apple,stock,United States,Technology,Consumer Electronics,,US0378331005
-US67066G1040,US67066G1040,NVDA,NVIDIA,stock,United States,Technology,Semiconductors,,US67066G1040
-US0231351067,US0231351067,AMZN,Amazon,stock,United States,Consumer Discretionary,Internet Retail,,US0231351067
-US0079031078,US0079031078,AMD,AMD,stock,United States,Technology,Semiconductors,,US0079031078
-US30303M1027,US30303M1027,META,Meta,stock,United States,Communication Services,Internet Content & Information,,US30303M1027
-US64110L1061,US64110L1061,NFLX,Netflix,stock,United States,Communication Services,Entertainment,,US64110L1061
-US90353T1007,US90353T1007,UBER,Uber,stock,United States,Industrials,Ride Sharing,,US90353T1007
-US33813J1060,US33813J1060,FSR,Fisker,stock,United States,Consumer Discretionary,Auto Manufacturers,,US33813J1060
+key,isin,symbol,instrument,asset_class,price_scale,fallback_valuation,country,sector,industry,lookthrough_provider,search_query
+IE00BK5BQT80,IE00BK5BQT80,IE00BK5BQT80.SG,Vanguard FTSE All-World UCITS ETF,etf,,,Global,Global equities,Global equity ETF,vanguard_all_world,IE00BK5BQT80
+IE00B4ND3602,IE00B4ND3602,SGLN.MI,iShares Physical Gold ETC,gold,,,Global,Commodities,Gold,,iShares Physical Gold ETC
+LU0908500753,LU0908500753,MEUD.PA,Amundi Core Stoxx Europe 600 UCITS ETF Acc,etf,,,Europe,European equities,Europe equity ETF,amundi_stoxx_europe_600,LU0908500753
+IE00B5BMR087,IE00B5BMR087,SXR8.DE,iShares Core S&P 500 UCITS ETF USD (Acc),etf,,,United States,US equities,US equity ETF,ishares_core_sp500,IE00B5BMR087
+IE00B4L5Y983,IE00B4L5Y983,EUNL.DE,iShares Core MSCI World UCITS ETF USD (Acc),etf,,,Global,Global equities,Global equity ETF,ishares_core_msci_world,IE00B4L5Y983
+IE00B53SZB19,IE00B53SZB19,CNDX.L,iShares Nasdaq 100 UCITS ETF USD (Acc),etf,,,United States,US growth equities,Nasdaq 100 ETF,ishares_nasdaq_100,IE00B53SZB19
+IE00B3WJKG14,IE00B3WJKG14,IUIT.L,iShares S&P 500 Information Technology Sector UCITS ETF USD (Acc),etf,,,United States,Technology,US technology ETF,ishares_sp500_info_tech,IE00B3WJKG14
+LU1900066033,LU1900066033,,Amundi MSCI Europe ESG Screened UCITS ETF,etf,,,Europe,European equities,Europe ESG ETF,,LU1900066033
+XF000BTC0017,XF000BTC0017,BTC-USD,Bitcoin,crypto,,,Digital assets,Crypto,Crypto,,Bitcoin
+XF000ETH0019,XF000ETH0019,ETH-USD,Ethereum,crypto,,,Digital assets,Crypto,Crypto,,Ethereum
+US0378331005,US0378331005,AAPL,Apple,stock,,,United States,Technology,Consumer Electronics,,US0378331005
+US67066G1040,US67066G1040,NVDA,NVIDIA,stock,,,United States,Technology,Semiconductors,,US67066G1040
+US0231351067,US0231351067,AMZN,Amazon,stock,,,United States,Consumer Discretionary,Internet Retail,,US0231351067
+US0079031078,US0079031078,AMD,AMD,stock,,,United States,Technology,Semiconductors,,US0079031078
+US30303M1027,US30303M1027,META,Meta,stock,,,United States,Communication Services,Internet Content & Information,,US30303M1027
+US64110L1061,US64110L1061,NFLX,Netflix,stock,,,United States,Communication Services,Entertainment,,US64110L1061
+US90353T1007,US90353T1007,UBER,Uber,stock,,,United States,Industrials,Ride Sharing,,US90353T1007
+US33813J1060,US33813J1060,FSR,Fisker,stock,,,United States,Consumer Discretionary,Auto Manufacturers,,US33813J1060

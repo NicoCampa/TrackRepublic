@@ -1,15 +1,13 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Bar, BarChart, CartesianGrid, Cell, ComposedChart, LabelList, Legend, Line, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, Cell, LabelList, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { AccountsData } from "@/lib/accounts-data";
 import type { TransactionRecord } from "@/lib/dashboard-data";
 import {
   averageMonthlyStory,
-  annotateMonthLabel,
   applyCapitalFilters,
   applyTransactionFilters,
-  buildQuickYearRanges,
   createInitialFilterState,
   formatAsOfDate,
   formatDateRange,
@@ -17,31 +15,23 @@ import {
   formatEuro,
   formatMonthTitle,
   formatPercent,
-  incompleteMonthLabels,
   resolvePeriodBounds,
-  SPENDING_BUCKETS,
   sumInvesting,
-  sumMoneyIn,
   sumMoneyOut,
   sumNetResult,
-  summarizeMonthlyStory,
   topIncomeSources,
   uniqueTransactionDates,
 } from "@/lib/dashboard-utils";
 import { buildInvestmentAnalytics } from "@/lib/investment-performance";
-import { CATEGORY_THEME } from "@/lib/category-config";
-import type { DetailView } from "./dashboard-ui";
-import { ChartTooltipContent, ClickableMetricGrid, DashboardShell, DataTable, DetailSheet, FilterBar, Panel, SignedAmount, defaultFilterState } from "./dashboard-ui";
+import { resolveCategoryTheme } from "@/lib/category-config";
+import {
+  buildIncomeCategoryScopeProfiles,
+  matchesIncomeCategoryScope,
+  resolveIncomeCategoryScopeTheme,
+} from "@/lib/income-category-scope";
+import type { DetailTrendView, DetailView } from "./dashboard-ui";
+import { CategoryEditor, ChartTooltipContent, ClickableMetricGrid, DashboardShell, DataTable, DetailSheet, FilterBar, Panel, SignedAmount, defaultFilterState } from "./dashboard-ui";
 
-const CATEGORY_COLORS = [
-  "hsl(var(--accent-primary))",
-  "hsl(var(--accent-secondary))",
-  "hsl(var(--accent-tertiary))",
-  "hsl(var(--accent-quaternary))",
-  "hsl(280 100% 70%)",
-  "hsl(190 100% 50%)",
-  "hsl(150 100% 50%)",
-];
 const TREEMAP_EURO_FORMATTER = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "EUR",
@@ -53,7 +43,12 @@ const TREEMAP_BALANCED_FLOOR_FACTOR = 0.55;
 const TREEMAP_CANVAS_WIDTH = 1000;
 const TREEMAP_CANVAS_HEIGHT = 620;
 const TREEMAP_TILE_GAP = 14;
-const TREEMAP_TAIL_TARGET_COUNT = 4;
+const TREEMAP_COLUMN_COUNT = 3;
+const DETAIL_TREND_MONTH_FORMATTER = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  year: "2-digit",
+  timeZone: "UTC",
+});
 
 type SpendingRankEntry = {
   categoryLabel: string;
@@ -74,20 +69,14 @@ type SpendingTreemapTile = SpendingRankEntry & {
 };
 
 type WidgetViewMode = "visual" | "treemap" | "table";
-type HomeWidgetKey = "spending" | "trend" | "income";
+type HomeWidgetKey = "spending" | "income";
 type MetricViewMode = "total" | "average";
-const HOME_TREND_MONTHS = 12;
 const WIDGET_VISUAL_LABELS: Record<HomeWidgetKey, string> = {
   spending: "Bar chart",
-  trend: "Trend",
   income: "Donut",
 };
 
 type SpendingDetailPayload = Pick<SpendingRankEntry, "categoryLabel" | "categoryKeys" | "amount" | "share">;
-type TrendMonthPayload = {
-  monthLabel?: string;
-  displayMonthLabel?: string;
-};
 type ActiveChartState<TPayload> = {
   activePayload?: Array<{
     payload?: TPayload;
@@ -102,10 +91,60 @@ function getActiveChartPayload<TPayload>(state: ActiveChartState<TPayload> | und
   return state?.activePayload?.[0]?.payload;
 }
 
+function buildDetailTrendMonths(endMonthLabel: string, count = 12) {
+  const [endYear, endMonth] = endMonthLabel.split("-").map(Number);
+  return Array.from({ length: count }, (_, index) => {
+    const offset = count - index - 1;
+    const date = new Date(Date.UTC(endYear, endMonth - 1 - offset, 1));
+    const monthLabel = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+    return {
+      monthLabel,
+      displayMonthLabel: DETAIL_TREND_MONTH_FORMATTER.format(date),
+    };
+  });
+}
+
+function buildTransactionDetailTrend(
+  rows: TransactionRecord[],
+  endMonthLabel: string,
+  direction: "inflow" | "outflow",
+  color: string,
+): DetailTrendView {
+  const monthWindow = buildDetailTrendMonths(endMonthLabel);
+  const totals = new Map(monthWindow.map((month) => [month.monthLabel, 0]));
+
+  for (const row of rows) {
+    if (!totals.has(row.monthLabel)) {
+      continue;
+    }
+
+    if (direction === "outflow" && row.signedAmount < 0) {
+      totals.set(row.monthLabel, (totals.get(row.monthLabel) ?? 0) + Math.abs(row.signedAmount));
+      continue;
+    }
+
+    if (direction === "inflow" && row.signedAmount > 0) {
+      totals.set(row.monthLabel, (totals.get(row.monthLabel) ?? 0) + row.signedAmount);
+    }
+  }
+
+  return {
+    title: `${direction === "outflow" ? "Outflow" : "Inflow"} trend`,
+    note: `Last 12 months to ${formatMonthTitle(endMonthLabel)}`,
+    valueLabel: direction === "outflow" ? "Outflow" : "Inflow",
+    color,
+    data: monthWindow.map((month) => ({
+      monthLabel: month.monthLabel,
+      displayMonthLabel: month.displayMonthLabel,
+      value: totals.get(month.monthLabel) ?? 0,
+    })),
+  };
+}
+
 function buildSpendingRankings(transactions: TransactionRecord[]): SpendingRankEntry[] {
   const totals = new Map<string, { categoryLabel: string; amount: number }>();
   for (const row of transactions) {
-    if (!SPENDING_BUCKETS.has(row.cashflowBucket) || row.signedAmount >= 0) continue;
+    if (row.signedAmount >= 0 || row.group === "investment") continue;
     const current = totals.get(row.category) ?? { categoryLabel: row.categoryLabel, amount: 0 };
     current.amount += Math.abs(row.signedAmount);
     totals.set(row.category, current);
@@ -125,7 +164,7 @@ function buildSpendingRankings(transactions: TransactionRecord[]): SpendingRankE
   const balancedFloor = averageBalancedWeight * TREEMAP_BALANCED_FLOOR_FACTOR;
   return ranked.map((row, index) => ({
     ...row,
-    color: CATEGORY_THEME[row.categoryKeys[0]]?.solid ?? CATEGORY_COLORS[index % CATEGORY_COLORS.length],
+    color: resolveCategoryTheme(row.categoryKeys[0]).solid,
     treemapWeight: Math.max(balancedWeights[index] ?? 0, balancedFloor),
   }));
 }
@@ -136,39 +175,19 @@ function formatTreemapAmount(amount: number, compact: boolean) {
 }
 
 function splitSpendingTreemapColumns(rows: SpendingRankEntry[]) {
-  if (rows.length <= 3) {
-    return [rows];
+  const columnCount = Math.min(TREEMAP_COLUMN_COUNT, rows.length);
+  const groups: SpendingRankEntry[][] = [];
+  let startIndex = 0;
+
+  for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
+    const remainingRows = rows.length - startIndex;
+    const remainingColumns = columnCount - columnIndex;
+    const nextColumnSize = Math.ceil(remainingRows / remainingColumns);
+    groups.push(rows.slice(startIndex, startIndex + nextColumnSize));
+    startIndex += nextColumnSize;
   }
 
-  if (rows.length <= 6) {
-    return [rows.slice(0, 2), rows.slice(2)];
-  }
-
-  const leadCount = 2;
-  const tailCount = Math.min(TREEMAP_TAIL_TARGET_COUNT, Math.max(3, rows.length - leadCount - 1));
-  const middleCount = Math.max(0, rows.length - leadCount - tailCount);
-  const groups = [
-    rows.slice(0, leadCount),
-    rows.slice(leadCount, leadCount + middleCount),
-    rows.slice(leadCount + middleCount),
-  ].filter((group) => group.length > 0);
-
-  return groups;
-}
-
-function buildTreemapColumnShares(groups: SpendingRankEntry[][]) {
-  const baseWeights = groups.map((group) => group.reduce((sum, row) => sum + row.treemapWeight, 0));
-  if (baseWeights.length === 1) {
-    return [1];
-  }
-
-  const floorShares =
-    baseWeights.length === 2
-      ? [0.46, 0.34]
-      : [0.36, 0.22, 0.28].slice(0, baseWeights.length);
-  const floored = baseWeights.map((weight, index) => Math.max(weight, floorShares[index] ?? 0));
-  const total = floored.reduce((sum, weight) => sum + weight, 0) || 1;
-  return floored.map((weight) => weight / total);
+  return groups.filter((group) => group.length > 0);
 }
 
 function classifyTreemapTileSize(width: number, height: number): SpendingTreemapTile["size"] {
@@ -188,23 +207,58 @@ function classifyTreemapTileSize(width: number, height: number): SpendingTreemap
   return "tiny";
 }
 
+function resolveTreemapTileContent(tile: SpendingTreemapTile) {
+  const availableWidth = Math.max(0, tile.width - 24);
+  const availableHeight = Math.max(0, tile.height - 18);
+  const maxLabelFontPx = tile.size === "hero" ? 16 : tile.size === "large" ? 14.5 : tile.size === "medium" ? 13 : 11.5;
+  const minLabelFontPx = tile.size === "tiny" ? 7.2 : 8;
+  const labelLineHeight = 1.08;
+  const candidateLineClamps = [3, 2, 1].filter((lines) => availableHeight >= lines * minLabelFontPx * labelLineHeight + 4);
+
+  let bestLabelFit: { lines: number; fontPx: number } | null = null;
+
+  for (const lines of candidateLineClamps) {
+    const approxCharsPerLine = Math.ceil(tile.categoryLabel.length / lines);
+    const widthFitPx = availableWidth / Math.max(approxCharsPerLine * 0.61, 1);
+    const heightFitPx = (availableHeight - 2) / (lines * labelLineHeight);
+    const fontPx = Math.min(maxLabelFontPx, widthFitPx, heightFitPx);
+
+    if (fontPx < minLabelFontPx) {
+      continue;
+    }
+
+    if (!bestLabelFit || fontPx > bestLabelFit.fontPx || (fontPx === bestLabelFit.fontPx && lines < bestLabelFit.lines)) {
+      bestLabelFit = { lines, fontPx };
+    }
+  }
+
+  const showLabel = Boolean(bestLabelFit) && availableWidth >= 68 && availableHeight >= 18;
+  const labelLineClamp = bestLabelFit?.lines ?? 1;
+  const labelFontPx = bestLabelFit?.fontPx ?? minLabelFontPx;
+  const labelHeight = showLabel ? labelFontPx * labelLineHeight * labelLineClamp : 0;
+  const remainingHeight = Math.max(0, availableHeight - labelHeight - 4);
+  const showValue = showLabel && tile.size !== "tiny" && availableWidth >= 88 && remainingHeight >= 14;
+  const showShare = (tile.size === "hero" || tile.size === "large") && availableWidth >= 116 && remainingHeight >= 26;
+
+  return { showLabel, showValue, showShare, labelFontPx, labelLineClamp };
+}
+
 function buildSpendingTreemapLayout(rows: SpendingRankEntry[]): SpendingTreemapTile[] {
   if (rows.length === 0) {
     return [];
   }
 
   const groups = splitSpendingTreemapColumns(rows);
-  const columnShares = buildTreemapColumnShares(groups);
   const usableWidth = TREEMAP_CANVAS_WIDTH - TREEMAP_TILE_GAP * Math.max(0, groups.length - 1);
+  const baseColumnWidth = Math.floor(usableWidth / groups.length);
   const layout: SpendingTreemapTile[] = [];
   let currentX = 0;
 
   groups.forEach((group, groupIndex) => {
     const isLastColumn = groupIndex === groups.length - 1;
-    const rawWidth = usableWidth * (columnShares[groupIndex] ?? 0);
     const columnWidth = isLastColumn
       ? TREEMAP_CANVAS_WIDTH - currentX
-      : Math.max(96, Math.round(rawWidth));
+      : Math.max(96, baseColumnWidth);
     const usableHeight = TREEMAP_CANVAS_HEIGHT - TREEMAP_TILE_GAP * Math.max(0, group.length - 1);
     const columnWeight = group.reduce((sum, row) => sum + row.treemapWeight, 0) || 1;
     let currentY = 0;
@@ -242,15 +296,15 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
   const [showCustomPeriod, setShowCustomPeriod] = useState(false);
   const [metricViewMode, setMetricViewMode] = useState<MetricViewMode>("total");
   const [hoveredSpendingCategory, setHoveredSpendingCategory] = useState<string | null>(null);
-  const [hoveredTrendMonth, setHoveredTrendMonth] = useState<TrendMonthPayload | null>(null);
+  const [hoveredSpendingRow, setHoveredSpendingRow] = useState<SpendingDetailPayload | null>(null);
   const [widgetViewModes, setWidgetViewModes] = useState<Record<HomeWidgetKey, WidgetViewMode>>({
     spending: "visual",
-    trend: "visual",
     income: "visual",
   });
 
   const filteredTransactions = applyTransactionFilters(data.transactions, filters);
   const filteredCapitalSeries = applyCapitalFilters(data.capitalSeries, filters);
+  const detailTrendEndMonth = filters.endDate.slice(0, 7);
   const analytics = useMemo(
     () =>
       buildInvestmentAnalytics({
@@ -262,6 +316,7 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
         rangeStartDate: filters.startDate,
         historicalUnitEstimates: data.historicalUnitEstimates,
         positionUnitOverrides: data.positionUnitOverrides,
+        positionValuationOverrides: data.positionValuationOverrides,
         registry: data.instrumentRegistry,
       }),
     [
@@ -271,34 +326,34 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
       data.instrumentRegistry,
       data.liveQuotes,
       data.positionUnitOverrides,
+      data.positionValuationOverrides,
       data.transactions,
       filters.endDate,
       filters.startDate,
     ],
   );
 
-  const partialMonths = incompleteMonthLabels(filters);
   const thisMonthRange = resolvePeriodBounds(dates, "thisMonth");
   const lastMonthRange = resolvePeriodBounds(dates, "lastMonth");
   const yearToDateRange = resolvePeriodBounds(dates, "yearToDate");
   const lastTwelveRange = resolvePeriodBounds(dates, "last12");
   const allTimeRange = resolvePeriodBounds(dates, "allTime");
-  const filterStartMonth = filters.startDate.slice(0, 7);
-  const filterEndMonth = filters.endDate.slice(0, 7);
-  const allMonthly = summarizeMonthlyStory(data.transactions);
-  const visibleMonthly = allMonthly.filter((row) => row.monthLabel >= filterStartMonth && row.monthLabel <= filterEndMonth);
-  const useRecentContextTrend = visibleMonthly.length < 2;
-  const trendSource = useRecentContextTrend ? allMonthly.filter((row) => row.monthLabel <= filterEndMonth) : visibleMonthly;
-  const recentMonthly = trendSource.slice(-HOME_TREND_MONTHS).map((row) => ({ ...row, displayMonthLabel: annotateMonthLabel(row.monthLabel, filters) }));
   const spendingRankings = buildSpendingRankings(filteredTransactions);
+  const incomeScopeProfiles = useMemo(() => buildIncomeCategoryScopeProfiles(data.transactions), [data.transactions]);
+  const incomeScopeProfileMap = useMemo(() => new Map(incomeScopeProfiles.map((profile) => [profile.key, profile])), [incomeScopeProfiles]);
   const monthlyAverage = averageMonthlyStory(filteredTransactions);
   const widgetAverageMonthCount = monthlyAverage?.months ?? 0;
   const showAverageWidgetValues = metricViewMode === "average" && widgetAverageMonthCount > 0;
   const widgetAmountDivisor = showAverageWidgetValues ? widgetAverageMonthCount : 1;
-  const incomeTotal = sumMoneyIn(filteredTransactions);
+  const incomeTotal = filteredTransactions.reduce((sum, row) => sum + (row.signedAmount > 0 && row.group !== "investment" ? row.signedAmount : 0), 0);
+  const inflowTotal = filteredTransactions.reduce(
+    (sum, row) => sum + (row.signedAmount > 0 && row.group !== "investment" ? row.signedAmount : 0),
+    0,
+  );
   const spendingTotal = sumMoneyOut(filteredTransactions);
   const investingTotal = sumInvesting(filteredTransactions);
   const netResultTotal = sumNetResult(filteredTransactions);
+  const incomeAverage = widgetAverageMonthCount > 0 ? incomeTotal / widgetAverageMonthCount : 0;
   const latestCapitalPoint = filteredCapitalSeries.at(-1) ?? data.capitalSeries.at(-1) ?? null;
   const cashBalance = latestCapitalPoint?.availableCash ?? analytics.snapshot.availableCash;
   const spendingWidgetRows = spendingRankings.map((row) => ({
@@ -306,13 +361,13 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
     amount: row.amount / widgetAmountDivisor,
   }));
   const spendingTreemapTiles = useMemo(() => buildSpendingTreemapLayout(spendingWidgetRows), [spendingWidgetRows]);
-  const incomeRows = topIncomeSources(filteredTransactions, 5).map((row) => ({
+  const incomeRows = topIncomeSources(filteredTransactions, 5, incomeScopeProfiles).map((row) => ({
     label: row.sourceLabel,
     sourceKind: row.sourceKind,
     sourceValue: row.sourceValue,
-    share: incomeTotal > 0 ? (row.amount / incomeTotal) * 100 : 0,
+    share: inflowTotal > 0 ? (row.amount / inflowTotal) * 100 : 0,
     amount: row.amount / widgetAmountDivisor,
-    color: CATEGORY_COLORS[row.sourceLabel.length % CATEGORY_COLORS.length],
+    color: resolveIncomeCategoryScopeTheme(row.sourceValue, incomeScopeProfileMap).solid,
   }));
 
   const activePreset =
@@ -342,30 +397,14 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
   const explicitMonthLabel = filters.startDate ? formatMonthTitle(filters.startDate.slice(0, 7)) : activeWindowLabel;
   const contextPeriodLabel = filters.activeQuickLabel || (activePreset === "thisMonth" || activePreset === "lastMonth" ? explicitMonthLabel : activeWindowLabel);
   const kpiScopeNote = activeWindowLabel;
-  const kpiAverageNote = monthlyAverage ? `Avg / month over ${monthlyAverage.months} visible months` : "No visible months";
-  const widgetAverageNote = showAverageWidgetValues ? `Avg / month over ${widgetAverageMonthCount} visible months` : "";
-  const topStatus = filters.excludeIncompleteMonths
-    ? "Partial hidden"
-    : partialMonths.length > 0
-      ? `Partial · ${partialMonths.length === 1 ? partialMonths[0] : `${partialMonths.length} months`}`
-      : "";
-  const trendTitle = useRecentContextTrend ? `Last ${recentMonthly.length} months to ${explicitMonthLabel}` : `Last ${recentMonthly.length} visible months`;
+  const kpiAverageNote = monthlyAverage ? `Avg / month over ${monthlyAverage.months} months` : "No months";
+  const widgetAverageNote = showAverageWidgetValues ? `Avg / month over ${widgetAverageMonthCount} months` : "";
   const spendingTableRows = spendingWidgetRows.map((row) => ({
     categoryLabel: row.categoryLabel,
     share: row.share,
     amount: row.amount,
     categoryKeys: row.categoryKeys,
   }));
-  const monthlyTableRows = recentMonthly
-    .map((row) => ({
-      monthLabel: row.monthLabel,
-      displayMonthLabel: row.displayMonthLabel,
-      cashIn: row.cashIn,
-      cashOut: row.cashOut,
-      investing: row.investing,
-      netResult: row.netResult,
-    }))
-    .reverse();
   const incomeTableRows = incomeRows.map((row) => ({
     label: row.label,
     sourceKind: row.sourceKind,
@@ -376,16 +415,17 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
   const spendingContextMeta =
     showAverageWidgetValues
       ? `${spendingWidgetRows.length} categories · ${widgetAverageNote}`
-      : `${spendingWidgetRows.length} visible categories`;
-  const incomeContextMeta = showAverageWidgetValues ? widgetAverageNote : `${incomeRows.length} visible sources`;
+      : `${spendingWidgetRows.length} categories`;
+  const incomeContextMeta = showAverageWidgetValues ? widgetAverageNote : `${incomeRows.length} sources`;
   const spendingValueLabel = showAverageWidgetValues ? "Out / month" : "Out";
   const incomeValueLabel = showAverageWidgetValues ? "In / month" : "In";
-  const trendContextMeta = showAverageWidgetValues ? "Month-by-month actuals" : "In, out, invested, and net";
+  const spendingBarChartHeight = Math.max(286, spendingWidgetRows.length * 30 + 20);
+  const spendingBarRowHeight = spendingWidgetRows.length > 0 ? (spendingBarChartHeight - 8) / spendingWidgetRows.length : 0;
 
   const metricItems =
     metricViewMode === "average"
       ? [
-          { label: "In", value: formatEuro(monthlyAverage?.income ?? 0), note: kpiAverageNote, tone: "positive" as const },
+          { label: "In", value: formatEuro(incomeAverage), note: kpiAverageNote, tone: "positive" as const },
           { label: "Out", value: formatEuro(monthlyAverage?.spending ?? 0), note: kpiAverageNote, tone: "negative" as const },
           { label: "Invested", value: formatEuro(monthlyAverage?.investing ?? 0), note: kpiAverageNote, tone: "accent" as const },
           {
@@ -414,26 +454,96 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
     ];
   };
 
-  const openTransactionDetail = (title: string, rows: TransactionRecord[], meta?: string) => {
+  const inferCategoryDetailTrend = (rows: TransactionRecord[]): DetailTrendView | undefined => {
+    if (rows.length === 0) {
+      return undefined;
+    }
+
+    const categoryKeys = [...new Set(rows.map((row) => row.category).filter(Boolean))];
+    if (categoryKeys.length !== 1) {
+      return undefined;
+    }
+
+    const hasPositive = rows.some((row) => row.signedAmount > 0);
+    const hasNegative = rows.some((row) => row.signedAmount < 0);
+    if (hasPositive === hasNegative) {
+      return undefined;
+    }
+
+    const categoryKey = categoryKeys[0];
+    const direction = hasNegative ? "outflow" as const : "inflow" as const;
+    const historicalRows = data.transactions.filter((row) => {
+      if (row.category !== categoryKey || row.monthLabel > detailTrendEndMonth) {
+        return false;
+      }
+      if (direction === "outflow") {
+        return row.signedAmount < 0 && row.group !== "investment";
+      }
+      return row.signedAmount > 0 && row.group !== "investment";
+    });
+
+    return buildTransactionDetailTrend(
+      historicalRows,
+      detailTrendEndMonth,
+      direction,
+      resolveCategoryTheme(categoryKey).solid,
+    );
+  };
+
+  const openTransactionDetail = (
+    title: string,
+    rows: TransactionRecord[],
+    meta?: string,
+    trend?: DetailTrendView,
+    trendCategoryKey?: string,
+  ) => {
     setDetail({
       title,
       meta: meta ?? `${rows.length.toLocaleString("en-US")} rows in the current view`,
       summary: buildSummary(rows),
+      trend: trend ?? inferCategoryDetailTrend(rows),
+      actionHref: trendCategoryKey ? `/spending?category=${encodeURIComponent(trendCategoryKey)}` : undefined,
+      actionLabel: trendCategoryKey ? "Open in Trend" : undefined,
       rows: rows
         .slice()
         .sort((left, right) => `${right.date}-${right.rowId}`.localeCompare(`${left.date}-${left.rowId}`))
         .slice(0, 160)
         .map((row) => ({
+          rowId: row.rowId,
           date: formatDisplayDate(row.date),
-          merchant: row.displayMerchant,
+          sortDate: row.date,
+          displayDescription: row.displayDescription,
+          description: row.description,
+          txType: row.txType,
+          groupKey: row.group,
           category: row.categoryLabel,
+          categoryKey: row.category,
+          categoryLabel: row.categoryLabel,
+          categoryOverride: row.categoryOverride,
+          investmentAssetClass: row.investmentAssetClass,
+          classifiedInvestmentAssetClass: row.classifiedInvestmentAssetClass,
+          investmentAssetClassOverride: row.investmentAssetClassOverride,
           amount: row.signedAmount,
+          signedAmount: row.signedAmount,
         })),
       columns: [
-        { key: "date", label: "Date" },
-        { key: "merchant", label: "Merchant" },
-        { key: "category", label: "Category" },
-        { key: "amount", label: "Amount", render: (value) => <SignedAmount value={Number(value)} /> },
+        { key: "date", label: "Date", sortable: true, sortKey: "sortDate", sortDefaultDirection: "desc" },
+        {
+          key: "displayDescription",
+          label: "Details",
+          cellClassName: "cell-description",
+          render: (_value, row) => (
+            <div className="table-transaction-cell">
+              <strong>{String(row.displayDescription)}</strong>
+              <small>
+                {String(row.txType)}
+                {String(row.description) && String(row.description) !== String(row.displayDescription) ? ` · ${String(row.description)}` : ""}
+              </small>
+            </div>
+          ),
+        },
+        { key: "category", label: "Category", render: (_value, row) => <CategoryEditor row={row} /> },
+        { key: "amount", label: "Amount", sortable: true, sortDefaultDirection: "desc", render: (value) => <SignedAmount value={Number(value)} /> },
       ],
     });
   };
@@ -469,8 +579,8 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
   };
 
   const openMetricDetail = (label: string) => {
-    if (label === "In") return openTransactionDetail("In transactions", filteredTransactions.filter((row) => row.signedAmount > 0));
-    if (label === "Out") return openTransactionDetail("Out transactions", filteredTransactions.filter((row) => row.signedAmount < 0));
+    if (label === "In") return openTransactionDetail("In transactions", filteredTransactions.filter((row) => row.signedAmount > 0 && row.group !== "investment"));
+    if (label === "Out") return openTransactionDetail("Out transactions", filteredTransactions.filter((row) => row.signedAmount < 0 && row.group !== "investment"));
     if (label === "Invested") return openTransactionDetail("Investment transactions", filteredTransactions.filter((row) => row.group === "investment"));
     if (label === "Portfolio value") return openPortfolioDetail();
     return openTransactionDetail("All transactions in view", filteredTransactions);
@@ -478,35 +588,54 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
 
   const openSpendingCategoryDetail = (payload?: SpendingDetailPayload) => {
     if (!payload) return;
+    const currentRows = filteredTransactions.filter((row) => row.signedAmount < 0 && payload.categoryKeys.includes(row.category));
+    const historicalRows = data.transactions.filter(
+      (row) => row.signedAmount < 0 && row.group !== "investment" && row.monthLabel <= detailTrendEndMonth && payload.categoryKeys.includes(row.category),
+    );
     openTransactionDetail(
-      `${payload.categoryLabel} expenses`,
-      filteredTransactions.filter((row) => SPENDING_BUCKETS.has(row.cashflowBucket) && payload.categoryKeys.includes(row.category)),
+      `${payload.categoryLabel} outflows`,
+      currentRows,
       `Category: ${payload.categoryLabel}`,
+      buildTransactionDetailTrend(
+        historicalRows,
+        detailTrendEndMonth,
+        "outflow",
+        resolveCategoryTheme(payload.categoryKeys[0]).solid,
+      ),
+      payload.categoryKeys.length === 1 ? payload.categoryKeys[0] : undefined,
     );
   };
 
-  const openIncomeSourceDetail = (payload?: { label: string; sourceKind: "merchant" | "category"; sourceValue: string }) => {
+  const openIncomeSourceDetail = (payload?: { label: string; sourceKind: "category"; sourceValue: string }) => {
     if (!payload) return;
 
     const matchingRows = filteredTransactions.filter((row) => {
-      if (row.group !== "income" || row.signedAmount <= 0) {
+      if (row.signedAmount <= 0) {
         return false;
       }
 
-      return payload.sourceKind === "category" ? row.category === payload.sourceValue : row.displayMerchant === payload.sourceValue;
+      return matchesIncomeCategoryScope(row, payload.sourceValue, incomeScopeProfileMap);
     });
 
-    openTransactionDetail(`${payload.label} income`, matchingRows, `Source: ${payload.label}`);
-  };
+    const historicalRows = data.transactions.filter((row) => {
+      if (row.signedAmount <= 0 || row.group === "investment" || row.monthLabel > detailTrendEndMonth) {
+        return false;
+      }
 
-  const openTrendMonthDetail = (payload?: TrendMonthPayload | null) => {
-    const monthLabel = payload?.monthLabel;
-    if (!monthLabel) return;
-    const displayMonthLabel = payload?.displayMonthLabel ?? monthLabel;
+      return matchesIncomeCategoryScope(row, payload.sourceValue, incomeScopeProfileMap);
+    });
+
     openTransactionDetail(
-      `Transactions in ${displayMonthLabel}`,
-      filteredTransactions.filter((row) => row.monthLabel === monthLabel),
-      `Month: ${displayMonthLabel}`,
+      `${payload.label} inflows`,
+      matchingRows,
+      `Source: ${payload.label}`,
+      buildTransactionDetailTrend(
+        historicalRows,
+        detailTrendEndMonth,
+        "inflow",
+        resolveIncomeCategoryScopeTheme(payload.sourceValue, incomeScopeProfileMap).solid,
+      ),
+      payload.sourceValue,
     );
   };
 
@@ -537,6 +666,9 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
   const setWidgetViewMode = (key: HomeWidgetKey, mode: WidgetViewMode) => {
     if (key === "spending" && mode !== "treemap") {
       setHoveredSpendingCategory(null);
+    }
+    if (key === "spending" && mode !== "visual") {
+      setHoveredSpendingRow(null);
     }
     setWidgetViewModes((current) => (current[key] === mode ? current : { ...current, [key]: mode }));
   };
@@ -592,7 +724,7 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
   );
 
   return (
-    <DashboardShell kicker="Cashflow" description="Cashflow summary for the selected period." hideHero>
+    <DashboardShell kicker="Cashflow" description="Cashflow summary for the selected period." hideHero viewportLocked>
       <section className="home-commandbar">
         <div className="home-commandbar-row">
           <div className="home-commandbar-title"><strong>Cashflow</strong></div>
@@ -605,7 +737,6 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
             <button type="button" className="quick-button quick-button-ghost" data-active={showCustomPeriod || activePreset === "custom"} onClick={() => setShowCustomPeriod((current) => !current)}>Custom</button>
           </div>
           <div className="home-commandbar-meta">
-            {topStatus ? <span className="home-status-pill">{topStatus}</span> : null}
             <span className="home-updated">Updated {formatAsOfDate(data.transactions.at(-1)?.date ?? filters.endDate)}</span>
           </div>
         </div>
@@ -630,40 +761,66 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
               <div className="home-panel-context"><strong>{contextPeriodLabel}</strong><span>{spendingContextMeta}</span></div>
               <div className="home-widget-body home-widget-body-primary">
                 {widgetViewModes.spending === "visual" ? (
-                  <div className="chart-box chart-home-primary">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart
-                        data={spendingWidgetRows}
-                        layout="vertical"
-                        margin={{ top: 4, right: 130, left: 0, bottom: 4 }}
-                        onClick={(state) => openSpendingCategoryDetail(getActiveChartPayload<SpendingDetailPayload>(state as ActiveChartState<SpendingDetailPayload>))}
-                      >
-                        <CartesianGrid stroke="rgba(223,231,243,0.06)" horizontal={false} />
-                        <XAxis type="number" hide />
-                        <YAxis dataKey="categoryLabel" type="category" width={138} tickLine={false} axisLine={false} stroke="hsl(var(--text-muted))" fontSize={12} />
-                        <Tooltip
-                          cursor={{ fill: "hsla(var(--text), 0.03)" }}
-                          content={
-                            <ChartTooltipContent
-                              formatLabel={(_label, payload) => String(payload?.[0]?.payload?.categoryLabel ?? "")}
-                              formatValue={(value, _name, item: any) => [
-                                `${formatEuro(Number(value))} · ${formatPercent(Number(item?.payload?.share ?? 0))}`,
-                                spendingValueLabel,
-                              ]}
-                            />
-                          }
-                        />
-                        <Bar
-                          dataKey="amount"
-                          radius={[0, 0, 0, 0]}
-                          barSize={18}
-                          cursor="pointer"
+                  <div className="chart-box chart-home-primary home-chart-scroll">
+                    <div className="home-chart-scroll-content" style={{ height: spendingBarChartHeight }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart
+                          data={spendingWidgetRows}
+                          layout="vertical"
+                          margin={{ top: 4, right: 130, left: 0, bottom: 4 }}
                         >
-                          {spendingWidgetRows.map((entry, index) => <Cell key={`${entry.categoryLabel}-${index}`} fill={entry.color} cursor="pointer" />)}
-                          <LabelList dataKey="amount" position="right" content={renderSpendingLabel} />
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
+                          <CartesianGrid stroke="rgba(223,231,243,0.06)" horizontal={false} />
+                          <XAxis type="number" hide />
+                          <YAxis dataKey="categoryLabel" type="category" width={138} tickLine={false} axisLine={false} stroke="hsl(var(--text-muted))" fontSize={12} />
+                          <Tooltip
+                            cursor={{ fill: "hsla(var(--text), 0.03)" }}
+                            content={
+                              <ChartTooltipContent
+                                formatLabel={(_label, payload) => String(payload?.[0]?.payload?.categoryLabel ?? "")}
+                                formatValue={(value, _name, item: any) => [
+                                  `${formatEuro(Number(value))} · ${formatPercent(Number(item?.payload?.share ?? 0))}`,
+                                  spendingValueLabel,
+                                ]}
+                              />
+                            }
+                          />
+                          <Bar
+                            dataKey="amount"
+                            radius={[0, 0, 0, 0]}
+                            barSize={18}
+                            cursor="pointer"
+                          >
+                            {spendingWidgetRows.map((entry, index) => <Cell key={`${entry.categoryLabel}-${index}`} fill={entry.color} cursor="pointer" />)}
+                            <LabelList dataKey="amount" position="right" content={renderSpendingLabel} />
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                      <div className="spending-chart-hit-grid" aria-hidden="true">
+                        {spendingWidgetRows.map((row, index) => (
+                          <button
+                            key={`${row.categoryLabel}-${index}-hit`}
+                            type="button"
+                            className="spending-chart-row-hit"
+                            style={{
+                              top: 4 + index * spendingBarRowHeight,
+                              height: spendingBarRowHeight,
+                            }}
+                            onMouseEnter={() => setHoveredSpendingRow(row)}
+                            onMouseLeave={() => setHoveredSpendingRow(null)}
+                            onClick={() =>
+                              openSpendingCategoryDetail({
+                                categoryLabel: row.categoryLabel,
+                                categoryKeys: row.categoryKeys,
+                                amount: row.amount,
+                                share: row.share,
+                              })
+                            }
+                          >
+                            <span className="sr-only">{`Open ${row.categoryLabel}`}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 ) : widgetViewModes.spending === "treemap" ? (
                   <div className="chart-box chart-home-primary chart-home-treemap">
@@ -672,6 +829,7 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
                         const isHovered = hoveredSpendingCategory === tile.categoryLabel;
                         const isDimmed = Boolean(hoveredSpendingCategory) && !isHovered;
                         const compactAmount = tile.size !== "hero" && tile.size !== "large";
+                        const { showLabel, showValue, showShare, labelFontPx, labelLineClamp } = resolveTreemapTileContent(tile);
 
                         return (
                           <button
@@ -700,9 +858,20 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
                             }
                           >
                             <span className="spending-treemap-tile-inner">
-                              <strong className="spending-treemap-tile-label">{tile.categoryLabel}</strong>
-                              <span className="spending-treemap-tile-value">{formatTreemapAmount(tile.amount, compactAmount)}</span>
-                              <span className="spending-treemap-tile-share">{formatPercent(tile.share)}</span>
+                              {showLabel ? (
+                                <strong
+                                  className="spending-treemap-tile-label"
+                                  style={{
+                                    fontSize: `${labelFontPx}px`,
+                                    WebkitLineClamp: labelLineClamp,
+                                    lineHeight: labelLineClamp === 1 ? 1.12 : 1.14,
+                                  }}
+                                >
+                                  {tile.categoryLabel}
+                                </strong>
+                              ) : null}
+                              {showValue ? <span className="spending-treemap-tile-value">{formatTreemapAmount(tile.amount, compactAmount)}</span> : null}
+                              {showShare ? <span className="spending-treemap-tile-share">{formatPercent(tile.share)}</span> : null}
                             </span>
                           </button>
                         );
@@ -739,9 +908,9 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
           )}
         </Panel>
 
-        <Panel title="Income sources" actions={renderWidgetViewToggle("income")} className="home-panel-fixed home-panel-fixed-primary">
+        <Panel title="In by category" actions={renderWidgetViewToggle("income")} className="home-panel-fixed home-panel-fixed-primary">
           {incomeRows.length === 0 ? (
-            <div className="empty">No income sources in this view.</div>
+            <div className="empty">No income categories are available in this view.</div>
           ) : (
             <div className="home-panel-stack">
               <div className="home-panel-context"><strong>{contextPeriodLabel}</strong><span>{incomeContextMeta}</span></div>
@@ -773,7 +942,7 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
                           onClick={(entry: any) => {
                             const label = String(entry?.label ?? "");
                             const sourceValue = String(entry?.sourceValue ?? "");
-                            const sourceKind = entry?.sourceKind === "category" ? "category" : "merchant";
+                            const sourceKind = "category" as const;
                             if (label && sourceValue) {
                               openIncomeSourceDetail({ label, sourceKind, sourceValue });
                             }
@@ -814,7 +983,7 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
                       onRowClick={(row) =>
                         openIncomeSourceDetail({
                           label: String(row.label),
-                          sourceKind: row.sourceKind === "category" ? "category" : "merchant",
+                          sourceKind: "category",
                           sourceValue: String(row.sourceValue),
                         })
                       }
@@ -826,80 +995,6 @@ export function OverviewDashboard({ data }: { data: AccountsData }) {
                       },
                         { key: "share", label: "Share", align: "right", cellClassName: "cell-nowrap", render: (value) => <span>{formatPercent(Number(value))}</span> },
                         { key: "amount", label: incomeValueLabel, align: "right", cellClassName: "cell-nowrap", render: (value) => <span>{formatEuro(Number(value))}</span> },
-                      ]}
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </Panel>
-      </section>
-
-      <section className="home-secondary-grid home-secondary-grid-single">
-        <Panel title="Monthly trend" actions={renderWidgetViewToggle("trend")} className="home-panel-fixed home-panel-fixed-trend">
-          {recentMonthly.length === 0 ? (
-            <div className="empty">No monthly trend is available in this view.</div>
-          ) : (
-            <div className="home-panel-stack">
-              <div className="home-panel-context"><strong>{trendTitle}</strong><span>{trendContextMeta}</span></div>
-              <div className="home-widget-body home-widget-body-trend">
-                {widgetViewModes.trend === "visual" ? (
-                  <div className="chart-box chart-home-trend-wide chart-box-interactive">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <ComposedChart
-                        data={recentMonthly}
-                        onMouseMove={(state: any) => {
-                          const payload = getActiveChartPayload<TrendMonthPayload>(state as ActiveChartState<TrendMonthPayload>);
-                          setHoveredTrendMonth(payload?.monthLabel ? payload : null);
-                        }}
-                        onMouseLeave={() => setHoveredTrendMonth(null)}
-                        onClick={(state: any) => {
-                          const payload = getActiveChartPayload<TrendMonthPayload>(state as ActiveChartState<TrendMonthPayload>) ?? hoveredTrendMonth;
-                          openTrendMonthDetail(payload);
-                        }}
-                      >
-                        <CartesianGrid stroke="rgba(223,231,243,0.08)" vertical={false} />
-                        <XAxis dataKey="displayMonthLabel" stroke="hsl(var(--text-muted))" fontSize={11} tickLine={false} axisLine={false} dy={8} minTickGap={16} />
-                        <YAxis stroke="hsl(var(--text-muted))" fontSize={11} tickLine={false} axisLine={false} tickFormatter={(val) => `€${val}`} />
-                        <Tooltip
-                          cursor={{ fill: "hsla(var(--text), 0.03)" }}
-                          content={
-                            <ChartTooltipContent
-                              formatLabel={(label) => String(label ?? "")}
-                              formatValue={(value) => formatEuro(Number(value ?? 0))}
-                            />
-                          }
-                        />
-                        <Legend iconType="circle" wrapperStyle={{ paddingTop: "12px" }} />
-                        <Bar dataKey="cashIn" name="In" fill="hsl(var(--accent-primary))" barSize={18} cursor="pointer" />
-                        <Bar dataKey="cashOut" name="Out" fill="hsl(var(--accent-secondary))" barSize={18} cursor="pointer" />
-                        <Bar dataKey="investing" name="Invested" fill="hsl(var(--accent-tertiary))" barSize={18} cursor="pointer" />
-                        <Line type="monotone" dataKey="netResult" name="Net" stroke="hsl(var(--accent-quaternary))" strokeWidth={3} cursor="pointer" dot={{ r: 4, fill: "hsl(var(--accent-quaternary))", strokeWidth: 2, stroke: "hsl(var(--bg))" }} activeDot={{ r: 6, strokeWidth: 0 }} />
-                      </ComposedChart>
-                    </ResponsiveContainer>
-                  </div>
-                ) : (
-                  <div className="home-table-panel">
-                    <DataTable
-                      density="compact"
-                      rows={monthlyTableRows}
-                      onRowClick={(row) =>
-                        openTrendMonthDetail({
-                          monthLabel: String(row.monthLabel),
-                          displayMonthLabel: String(row.displayMonthLabel),
-                        })
-                      }
-                      columns={[
-                        {
-                          key: "displayMonthLabel",
-                          label: "Month",
-                          render: (value) => <span>{String(value)}</span>,
-                        },
-                        { key: "cashIn", label: "In", align: "right", cellClassName: "cell-nowrap", render: (value) => <span>{formatEuro(Number(value))}</span> },
-                        { key: "cashOut", label: "Out", align: "right", cellClassName: "cell-nowrap", render: (value) => <span>{formatEuro(Number(value))}</span> },
-                        { key: "investing", label: "Invested", align: "right", cellClassName: "cell-nowrap", render: (value) => <span>{formatEuro(Number(value))}</span> },
-                        { key: "netResult", label: "Net", align: "right", cellClassName: "cell-nowrap", render: (value) => <SignedAmount value={Number(value)} /> },
                       ]}
                     />
                   </div>

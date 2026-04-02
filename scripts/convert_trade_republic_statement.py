@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -133,6 +134,119 @@ class FundRow:
     price_per_unit: str
     amount: str
     raw_row: str
+
+
+def normalize_fingerprint_part(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def canonical_row_fingerprint(parts: Iterable[object]) -> str:
+    normalized = [normalize_fingerprint_part(part) for part in parts]
+    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+
+
+def stable_row_id(prefix: str, fingerprint: str) -> str:
+    digest = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+    return f"{prefix}_{digest}"
+
+
+def transaction_row_fingerprint(row: TransactionRow) -> str:
+    return canonical_row_fingerprint(
+        [
+            "transactions",
+            row.page,
+            row.date,
+            row.date_original,
+            row.type,
+            row.description,
+            row.signed_amount,
+            row.balance,
+            row.raw_row,
+        ]
+    )
+
+
+def fund_row_fingerprint(row: FundRow) -> str:
+    return canonical_row_fingerprint(
+        [
+            "money_market_fund",
+            row.page,
+            row.date,
+            row.date_original,
+            row.payment_type,
+            row.fund,
+            row.isin,
+            row.units,
+            row.price_per_unit,
+            row.amount,
+            row.raw_row,
+        ]
+    )
+
+
+def dedupe_transaction_rows(rows: list[TransactionRow]) -> tuple[list[TransactionRow], int]:
+    deduped: list[TransactionRow] = []
+    seen: set[str] = set()
+    dropped = 0
+    for row in rows:
+        fingerprint = transaction_row_fingerprint(row)
+        if fingerprint in seen:
+            dropped += 1
+            continue
+        seen.add(fingerprint)
+        deduped.append(row)
+    return deduped, dropped
+
+
+def dedupe_fund_rows(rows: list[FundRow]) -> tuple[list[FundRow], int]:
+    deduped: list[FundRow] = []
+    seen: set[str] = set()
+    dropped = 0
+    for row in rows:
+        fingerprint = fund_row_fingerprint(row)
+        if fingerprint in seen:
+            dropped += 1
+            continue
+        seen.add(fingerprint)
+        deduped.append(row)
+    return deduped, dropped
+
+
+def transaction_row_id(row: TransactionRow) -> str:
+    return stable_row_id("tx", transaction_row_fingerprint(row))
+
+
+def fund_row_id(row: FundRow) -> str:
+    return stable_row_id("fund", fund_row_fingerprint(row))
+
+
+def compute_statement_fingerprint(transaction_rows: list[TransactionRow], fund_rows: list[FundRow]) -> str:
+    row_ids = sorted(
+        [transaction_row_id(row) for row in transaction_rows]
+        + [fund_row_id(row) for row in fund_rows]
+    )
+    payload = "\n".join(row_ids)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def write_parse_metadata(
+    path: Path,
+    transaction_rows: list[TransactionRow],
+    fund_rows: list[FundRow],
+    transaction_duplicates_dropped: int,
+    fund_duplicates_dropped: int,
+) -> None:
+    payload = {
+        "transaction_row_count": len(transaction_rows),
+        "fund_row_count": len(fund_rows),
+        "duplicates_dropped": transaction_duplicates_dropped + fund_duplicates_dropped,
+        "transaction_duplicates_dropped": transaction_duplicates_dropped,
+        "fund_duplicates_dropped": fund_duplicates_dropped,
+        "statement_fingerprint": compute_statement_fingerprint(transaction_rows, fund_rows),
+    }
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False, sort_keys=True)
+        handle.write("\n")
 
 
 def english_output_name(value: str) -> str:
@@ -481,10 +595,10 @@ def write_transaction_csv(path: Path, rows: list[TransactionRow]) -> None:
             ],
         )
         writer.writeheader()
-        for row_id, row in enumerate(rows, start=1):
+        for row in rows:
             writer.writerow(
                 {
-                    "row_id": row_id,
+                    "row_id": transaction_row_id(row),
                     "page": row.page,
                     "date": row.date,
                     "date_original": row.date_original,
@@ -518,10 +632,10 @@ def write_fund_csv(path: Path, rows: list[FundRow]) -> None:
             ],
         )
         writer.writeheader()
-        for row_id, row in enumerate(rows, start=1):
+        for row in rows:
             writer.writerow(
                 {
-                    "row_id": row_id,
+                    "row_id": fund_row_id(row),
                     "page": row.page,
                     "date": row.date,
                     "date_original": row.date_original,
@@ -565,11 +679,10 @@ def write_combined_csv(
         )
         writer.writeheader()
 
-        row_id = 1
         for row in transaction_rows:
             writer.writerow(
                 {
-                    "row_id": row_id,
+                    "row_id": transaction_row_id(row),
                     "section": "transactions",
                     "page": row.page,
                     "date": row.date,
@@ -589,12 +702,10 @@ def write_combined_csv(
                     "raw_row": row.raw_row,
                 }
             )
-            row_id += 1
-
         for row in fund_rows:
             writer.writerow(
                 {
-                    "row_id": row_id,
+                    "row_id": fund_row_id(row),
                     "section": "money_market_fund",
                     "page": row.page,
                     "date": row.date,
@@ -614,8 +725,6 @@ def write_combined_csv(
                     "raw_row": row.raw_row,
                 }
             )
-            row_id += 1
-
 
 def main() -> None:
     ensure_environment()
@@ -640,18 +749,34 @@ def main() -> None:
         fund_rows.extend(build_fund_rows(page_number, pages[page_number]))
 
     transaction_rows = finalize_transaction_rows(transaction_rows_raw, starting_balance)
+    transaction_rows, transaction_duplicates_dropped = dedupe_transaction_rows(transaction_rows)
+    fund_rows, fund_duplicates_dropped = dedupe_fund_rows(fund_rows)
 
     transactions_path = output_dir / f"{prefix}_transactions.csv"
     fund_path = output_dir / f"{prefix}_money_market_fund.csv"
     combined_path = output_dir / f"{prefix}_all_rows.csv"
+    parse_meta_path = output_dir / f"{prefix}_parse_meta.json"
 
     write_transaction_csv(transactions_path, transaction_rows)
     write_fund_csv(fund_path, fund_rows)
     write_combined_csv(combined_path, transaction_rows, fund_rows)
+    write_parse_metadata(
+        parse_meta_path,
+        transaction_rows,
+        fund_rows,
+        transaction_duplicates_dropped,
+        fund_duplicates_dropped,
+    )
 
     print(f"Wrote {len(transaction_rows)} transaction rows to {transactions_path}")
     print(f"Wrote {len(fund_rows)} money market fund rows to {fund_path}")
     print(f"Wrote {len(transaction_rows) + len(fund_rows)} total rows to {combined_path}")
+    print(
+        "Dropped "
+        f"{transaction_duplicates_dropped + fund_duplicates_dropped} exact duplicate parsed rows "
+        f"({transaction_duplicates_dropped} transactions, {fund_duplicates_dropped} fund rows)"
+    )
+    print(f"Wrote parse metadata to {parse_meta_path}")
 
 
 if __name__ == "__main__":

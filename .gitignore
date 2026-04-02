@@ -5,10 +5,11 @@ node_modules/
 out/
 .venv/
 .streamlit/
+.tmp-ui-shots/
 src-tauri/target/
 src-tauri/gen/
 desktop-runtime/
-src-tauri-placeholder/
+src-tauri-bootstrap/
 data/raw/*
 !data/raw/.gitkeep
 data/processed/*
@@ -17,6 +18,7 @@ config/manual_category_rules.csv
 config/transaction_overrides.csv
 config/manual_transactions.csv
 config/position_unit_overrides.csv
+config/position_valuation_overrides.csv
 *.pyc
 __pycache__/
 tsconfig.tsbuildinfo

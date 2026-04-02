@@ -8,6 +8,12 @@ import {
   subMonths,
 } from "date-fns";
 import type { CapitalPoint, TransactionRecord } from "./dashboard-data";
+import {
+  buildIncomeCategoryScopeProfiles,
+  resolveIncomeCategoryScopeKeyForRow,
+  resolveIncomeCategoryScopeLabel,
+  type IncomeCategoryScopeProfile,
+} from "./income-category-scope";
 
 export type PeriodPreset = "thisMonth" | "lastMonth" | "yearToDate" | "last12" | "allTime" | "custom";
 
@@ -303,6 +309,50 @@ export function averageYearlyStory(transactions: TransactionRecord[]) {
   };
 }
 
+export type TrendCategorySummaryRow = {
+  periodKey: string;
+  cashIn: number;
+  cashOut: number;
+  netResult: number;
+  txCount: number;
+};
+
+export function summarizeTrendByCategory(
+  transactions: TransactionRecord[],
+  granularity: "month" | "year",
+  categoryKey: string,
+): TrendCategorySummaryRow[] {
+  const buckets = new Map<string, TrendCategorySummaryRow>();
+
+  for (const row of transactions) {
+    if (row.category !== categoryKey) {
+      continue;
+    }
+
+    const periodKey = granularity === "year" ? row.yearLabel : row.monthLabel;
+    const bucket = buckets.get(periodKey) ?? {
+      periodKey,
+      cashIn: 0,
+      cashOut: 0,
+      netResult: 0,
+      txCount: 0,
+    };
+
+    if (row.signedAmount > 0) {
+      bucket.cashIn += row.signedAmount;
+    }
+    if (row.signedAmount < 0) {
+      bucket.cashOut += Math.abs(row.signedAmount);
+    }
+
+    bucket.netResult += row.signedAmount;
+    bucket.txCount += 1;
+    buckets.set(periodKey, bucket);
+  }
+
+  return [...buckets.values()].sort((left, right) => left.periodKey.localeCompare(right.periodKey));
+}
+
 export function summarizeMonthlyStory(transactions: TransactionRecord[]) {
   const buckets = new Map<
     string,
@@ -317,7 +367,6 @@ export function summarizeMonthlyStory(transactions: TransactionRecord[]) {
       tax: number;
       investing: number;
       netResult: number;
-      reviewRows: number;
     }
   >();
 
@@ -333,12 +382,11 @@ export function summarizeMonthlyStory(transactions: TransactionRecord[]) {
       tax: 0,
       investing: 0,
       netResult: 0,
-      reviewRows: 0,
     };
     if (row.group === "income" && row.signedAmount > 0) {
       bucket.income += row.signedAmount;
     }
-    if (row.signedAmount > 0) {
+    if (row.signedAmount > 0 && row.group !== "investment") {
       bucket.cashIn += row.signedAmount;
     }
     if (SPENDING_BUCKETS.has(row.cashflowBucket) && row.signedAmount < 0) {
@@ -360,7 +408,6 @@ export function summarizeMonthlyStory(transactions: TransactionRecord[]) {
       bucket.investing += -row.signedAmount;
     }
     bucket.netResult += row.signedAmount;
-    bucket.reviewRows += row.needsReview ? 1 : 0;
     buckets.set(row.monthLabel, bucket);
   }
 
@@ -401,29 +448,32 @@ export function buildIncomeMix(transactions: TransactionRecord[], limit = 8) {
     .slice(0, limit);
 }
 
-export function topIncomeSources(transactions: TransactionRecord[], limit = 8) {
+export function topIncomeSources(transactions: TransactionRecord[], limit = 8, incomeScopeProfiles?: IncomeCategoryScopeProfile[]) {
+  const resolvedProfiles = incomeScopeProfiles ?? buildIncomeCategoryScopeProfiles(transactions);
+  const incomeScopeProfileMap = new Map(resolvedProfiles.map((profile) => [profile.key, profile]));
   const totals = new Map<
     string,
     {
       amount: number;
       categoryLabel: string;
       sourceLabel: string;
-      sourceKind: "merchant" | "category";
+      sourceKind: "category";
       sourceValue: string;
     }
   >();
   for (const row of transactions) {
-    if (row.group !== "income" || row.signedAmount <= 0) {
+    if (row.signedAmount <= 0 || row.group === "investment") {
       continue;
     }
 
-    const sourceKey = `category:${row.category}`;
+    const scopeKey = resolveIncomeCategoryScopeKeyForRow(row, incomeScopeProfileMap);
+    const sourceKey = `category:${scopeKey}`;
     const existing = totals.get(sourceKey) ?? {
       amount: 0,
       categoryLabel: row.categoryLabel,
-      sourceLabel: row.categoryLabel,
+      sourceLabel: resolveIncomeCategoryScopeLabel(scopeKey, incomeScopeProfileMap),
       sourceKind: "category" as const,
-      sourceValue: row.category,
+      sourceValue: scopeKey,
     };
     existing.amount += row.signedAmount;
     totals.set(sourceKey, existing);
@@ -440,16 +490,16 @@ export function topIncomeSources(transactions: TransactionRecord[], limit = 8) {
     .slice(0, limit);
 }
 
-export function topRecurringMerchants(transactions: TransactionRecord[], limit = 8) {
+export function topRecurringLabels(transactions: TransactionRecord[], limit = 8) {
   const totals = new Map<string, number>();
   for (const row of transactions) {
     if (!row.isRecurring || row.signedAmount >= 0) {
       continue;
     }
-    totals.set(row.displayMerchant, (totals.get(row.displayMerchant) ?? 0) + Math.abs(row.signedAmount));
+    totals.set(row.displayDescription, (totals.get(row.displayDescription) ?? 0) + Math.abs(row.signedAmount));
   }
   return [...totals.entries()]
-    .map(([merchant, amount]) => ({ merchant, amount }))
+    .map(([label, amount]) => ({ label, amount }))
     .sort((left, right) => right.amount - left.amount)
     .slice(0, limit);
 }
@@ -463,32 +513,6 @@ export function buildSpendingMix(transactions: TransactionRecord[]) {
     { name: "Flexible spending", value: variable },
     { name: "Taxes", value: tax },
   ].filter((row) => row.value > 0);
-}
-
-export function reviewSummary(transactions: TransactionRecord[]) {
-  const totals = new Map<string, number>();
-  for (const row of transactions) {
-    if (!row.needsReview) {
-      continue;
-    }
-    totals.set(row.classificationSourceLabel, (totals.get(row.classificationSourceLabel) ?? 0) + 1);
-  }
-  return [...totals.entries()]
-    .map(([name, value]) => ({ name, value }))
-    .sort((left, right) => right.value - left.value);
-}
-
-export function monthlyReviewCounts(transactions: TransactionRecord[]) {
-  const totals = new Map<string, number>();
-  for (const row of transactions) {
-    if (!row.needsReview) {
-      continue;
-    }
-    totals.set(row.monthLabel, (totals.get(row.monthLabel) ?? 0) + 1);
-  }
-  return [...totals.entries()]
-    .map(([monthLabel, rows]) => ({ monthLabel, rows }))
-    .sort((left, right) => left.monthLabel.localeCompare(right.monthLabel));
 }
 
 export function monthlyAccountMovements(transactions: TransactionRecord[]) {

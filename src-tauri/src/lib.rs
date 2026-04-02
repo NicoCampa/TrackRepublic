@@ -142,6 +142,26 @@ fn prepare_workspace(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     copy_file(
         &defaults_root
             .join("config")
+            .join("classifier_prompt_template.txt"),
+        &workspace_root
+            .join("config")
+            .join("classifier_prompt_template.txt"),
+        true,
+    )
+    .map_err(|error| format!("Failed to sync classifier prompt template: {error}"))?;
+    copy_file(
+        &defaults_root
+            .join("config")
+            .join("investment_asset_class_prompt_template.txt"),
+        &workspace_root
+            .join("config")
+            .join("investment_asset_class_prompt_template.txt"),
+        true,
+    )
+    .map_err(|error| format!("Failed to sync investment asset prompt template: {error}"))?;
+    copy_file(
+        &defaults_root
+            .join("config")
             .join("manual_category_rules.csv"),
         &workspace_root
             .join("config")
@@ -179,6 +199,16 @@ fn prepare_workspace(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         false,
     )
     .map_err(|error| format!("Failed to seed position overrides file: {error}"))?;
+    copy_file(
+        &defaults_root
+            .join("config")
+            .join("position_valuation_overrides.csv"),
+        &workspace_root
+            .join("config")
+            .join("position_valuation_overrides.csv"),
+        false,
+    )
+    .map_err(|error| format!("Failed to seed position valuation overrides file: {error}"))?;
 
     Ok(workspace_root)
 }

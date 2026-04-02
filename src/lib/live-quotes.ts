@@ -45,6 +45,13 @@ function normalizePrice(rawPrice: number, currency: string) {
   };
 }
 
+function normalizeInstrumentPrice(price: number, instrument: InvestmentInstrument) {
+  if (instrument.priceScale === "percent_of_par") {
+    return price / 100;
+  }
+  return price;
+}
+
 async function currentFxRate(currency: string): Promise<number> {
   if (!currency || currency === "EUR") {
     return 1;
@@ -132,20 +139,22 @@ async function quoteFromSymbol(
 
     const normalized = normalizePrice(marketPrice, String(quote.currency ?? ""));
     const fxRate = await currentFxRate(normalized.currency);
-    const priceEur = normalized.price * fxRate;
+    const price = normalizeInstrumentPrice(normalized.price, instrument);
+    const priceEur = price * fxRate;
 
     return {
       instrumentKey: instrument.key,
       isin: instrument.isin,
       instrument: instrument.instrument,
       assetClass: instrument.assetClass,
+      priceScale: instrument.priceScale,
       country: metadata.country,
       industry: metadata.industry,
       sector: metadata.sector,
       symbol,
       quoteName: resolvedName ?? String(quote.longName ?? quote.shortName ?? instrument.instrument),
       currency: normalized.currency || "EUR",
-      price: normalized.price,
+      price,
       priceEur,
       asOf: asIsoString(quote.regularMarketTime),
       exchange: resolvedExchange ?? String(quote.fullExchangeName ?? quote.exchange ?? ""),
@@ -156,7 +165,10 @@ async function quoteFromSymbol(
 }
 
 async function resolveBySearch(instrument: InvestmentInstrument): Promise<Partial<LiveQuote> | null> {
-  const cacheKey = instrument.searchQuery;
+  if (instrument.quoteSearchMode === "disabled") {
+    return null;
+  }
+  const cacheKey = `${instrument.quoteSearchMode}:${instrument.searchQuery}`;
   if (!searchCache.has(cacheKey)) {
     searchCache.set(
       cacheKey,
@@ -193,6 +205,9 @@ function fallbackCountry(instrument: InvestmentInstrument): string {
   if (instrument.assetClass === "gold") {
     return "Global";
   }
+  if (instrument.assetClass === "private_market") {
+    return /EURO|EUROP/.test(name) ? "Europe" : /US|AMERICA/.test(name) ? "United States" : "Global";
+  }
   if (instrument.assetClass === "bond" || instrument.assetClass === "bond_etf") {
     return /EURO|EUROP/.test(name) ? "Europe" : /US|TREASURY/.test(name) ? "United States" : "Global";
   }
@@ -215,6 +230,9 @@ function fallbackIndustry(instrument: InvestmentInstrument): string {
   }
   if (instrument.assetClass === "gold") {
     return "Gold";
+  }
+  if (instrument.assetClass === "private_market") {
+    return "Private market";
   }
   if (instrument.assetClass === "bond") {
     return "Bond";
@@ -246,6 +264,9 @@ function fallbackSector(instrument: InvestmentInstrument): string {
   }
   if (instrument.assetClass === "gold") {
     return "Commodities";
+  }
+  if (instrument.assetClass === "private_market") {
+    return "Private markets";
   }
   if (instrument.assetClass === "bond" || instrument.assetClass === "bond_etf") {
     return "Fixed income";
@@ -328,11 +349,12 @@ function latestFxRateForDate(fxRates: Map<string, number>, date: string): number
 }
 
 async function loadHistoricalEurSeries(
+  instrument: InvestmentInstrument,
   symbol: string,
   startDate: string,
   endDate: string,
 ): Promise<Map<string, number>> {
-  const cacheKey = `${symbol}:${startDate}:${endDate}`;
+  const cacheKey = `${instrument.key}:${symbol}:${startDate}:${endDate}`;
   if (!historicalSeriesCache.has(cacheKey)) {
     historicalSeriesCache.set(
       cacheKey,
@@ -374,7 +396,7 @@ async function loadHistoricalEurSeries(
             if (!fxRate || !Number.isFinite(fxRate) || fxRate <= 0) {
               continue;
             }
-            series.set(date, normalized.price * fxRate);
+            series.set(date, normalizeInstrumentPrice(normalized.price, instrument) * fxRate);
           }
 
           return series;
@@ -408,27 +430,37 @@ export async function loadLiveQuotes(
   return quotes.filter((quote): quote is LiveQuote => Boolean(quote));
 }
 
-export async function loadHistoricalCryptoUnitEstimates(
+export async function loadHistoricalUnitEstimates(
   transactions: TransactionRecord[],
+  liveQuotes: LiveQuote[],
   registry: InstrumentRegistryLookup = {},
 ): Promise<Record<string, HistoricalUnitEstimate>> {
-  const trades = extractInvestmentTrades(transactions, registry).filter(
-    (trade) => trade.assetClass === "crypto" && trade.units === null,
+  const parsedTrades = extractInvestmentTrades(transactions, registry);
+  const trades = parsedTrades.filter(
+    (trade) => trade.assetClass !== "private_market" && trade.units === null,
   );
   if (trades.length === 0) {
     return {};
   }
 
+  const liveQuoteMap = new Map(liveQuotes.map((quote) => [quote.instrumentKey, quote]));
+  const instrumentMap = new Map(
+    parsedTrades.map((trade) => [
+      trade.instrumentKey,
+      resolveInstrument(trade.isin ? `${trade.isin} ${trade.instrument}` : trade.instrument, registry),
+    ]),
+  );
   const byInstrument = new Map<string, { symbol: string; startDate: string; endDate: string }>();
   for (const trade of trades) {
-    const resolved = resolveInstrument(trade.isin ? `${trade.isin} ${trade.instrument}` : trade.instrument, registry);
-    if (!resolved.symbolHint) {
+    const resolved = instrumentMap.get(trade.instrumentKey);
+    const symbol = liveQuoteMap.get(trade.instrumentKey)?.symbol || resolved?.symbolHint;
+    if (!symbol) {
       continue;
     }
     const current = byInstrument.get(trade.instrumentKey);
     if (!current) {
       byInstrument.set(trade.instrumentKey, {
-        symbol: resolved.symbolHint,
+        symbol,
         startDate: trade.date,
         endDate: trade.date,
       });
@@ -445,7 +477,12 @@ export async function loadHistoricalCryptoUnitEstimates(
   const priceSeriesEntries = await Promise.all(
     [...byInstrument.entries()].map(async ([instrumentKey, meta]) => [
       instrumentKey,
-      await loadHistoricalEurSeries(meta.symbol, meta.startDate, meta.endDate),
+      await loadHistoricalEurSeries(
+        instrumentMap.get(instrumentKey) ?? resolveInstrument(instrumentKey, registry),
+        meta.symbol,
+        meta.startDate,
+        meta.endDate,
+      ),
     ] as const),
   );
   const priceSeries = new Map(priceSeriesEntries);
@@ -466,6 +503,14 @@ export async function loadHistoricalCryptoUnitEstimates(
   return estimates;
 }
 
+export async function loadHistoricalCryptoUnitEstimates(
+  transactions: TransactionRecord[],
+  registry: InstrumentRegistryLookup = {},
+): Promise<Record<string, HistoricalUnitEstimate>> {
+  const liveQuotes = await loadLiveQuotes(transactions, registry);
+  return loadHistoricalUnitEstimates(transactions, liveQuotes, registry);
+}
+
 export type HistoricalPriceSeries = Record<string, Record<string, number>>;
 
 export function historicalPriceOnOrBefore(series: Record<string, number>, date: string): number | null {
@@ -484,12 +529,19 @@ export async function loadHistoricalMarketSeries(
   liveQuotes: LiveQuote[],
   registry: InstrumentRegistryLookup = {},
 ): Promise<HistoricalPriceSeries> {
+  const parsedTrades = extractInvestmentTrades(transactions, registry);
   const tradeRanges = new Map<string, { symbol: string; startDate: string; endDate: string }>();
   const quoteMap = new Map(liveQuotes.map((quote) => [quote.instrumentKey, quote]));
+  const instrumentMap = new Map(
+    parsedTrades.map((trade) => [
+      trade.instrumentKey,
+      resolveInstrument(trade.isin ? `${trade.isin} ${trade.instrument}` : trade.instrument, registry),
+    ]),
+  );
 
-  for (const trade of extractInvestmentTrades(transactions, registry)) {
-    const resolved = resolveInstrument(trade.isin ? `${trade.isin} ${trade.instrument}` : trade.instrument, registry);
-    const symbol = quoteMap.get(trade.instrumentKey)?.symbol || resolved.symbolHint;
+  for (const trade of parsedTrades) {
+    const resolved = instrumentMap.get(trade.instrumentKey);
+    const symbol = quoteMap.get(trade.instrumentKey)?.symbol || resolved?.symbolHint;
     if (!symbol) {
       continue;
     }
@@ -509,7 +561,8 @@ export async function loadHistoricalMarketSeries(
   const output: HistoricalPriceSeries = {};
   await Promise.all(
     [...tradeRanges.entries()].map(async ([instrumentKey, range]) => {
-      const series = await loadHistoricalEurSeries(range.symbol, range.startDate, range.endDate);
+      const resolved = instrumentMap.get(instrumentKey) ?? resolveInstrument(instrumentKey, registry);
+      const series = await loadHistoricalEurSeries(resolved, range.symbol, range.startDate, range.endDate);
       output[instrumentKey] = Object.fromEntries([...series.entries()]);
     }),
   );

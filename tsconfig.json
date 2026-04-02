@@ -39,7 +39,7 @@
   "exclude": [
     "node_modules",
     "desktop-runtime",
-    "src-tauri-placeholder",
+    "src-tauri-bootstrap",
     "src-tauri/target"
   ]
 }

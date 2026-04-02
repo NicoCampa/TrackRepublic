@@ -1,26 +1,27 @@
 export const CATEGORY_LABELS: Record<string, string> = {
   salary: "Salary",
-  bonus_cashback: "Cashback & bonuses",
-  interest_dividend: "Interest & dividends",
-  refund: "Refunds",
+  bonus_cashback: "Bonus & cashback",
+  interest_dividend: "Interest & dividend",
+  refund: "Refund",
   groceries: "Groceries",
-  dining: "Restaurants & takeaway",
-  bars_cafes: "Bars & cafes",
+  restaurants_takeaway: "Restaurants & takeaway",
   transport: "Transport",
   travel: "Travel",
   shopping: "Shopping",
   subscriptions: "Subscriptions",
-  software_ai: "AI & software",
+  software_ai: "Software & AI",
   education: "Education",
   health: "Health",
+  insurance: "Insurance",
+  fitness_sports: "Fitness & sports",
   housing: "Housing",
   utilities: "Utilities",
-  telecom: "Phone & internet",
+  telecom: "Telecom",
   entertainment: "Entertainment",
   gifts: "Gifts",
   fees: "Fees",
-  internal_transfer: "Own-account transfers",
-  peer_transfer: "Transfers with other people",
+  internal_transfer: "Internal transfer",
+  peer_transfer: "Peer transfer",
   investing: "Investing",
   crypto: "Crypto",
   taxes: "Taxes",
@@ -49,6 +50,7 @@ export const BUCKET_LABELS: Record<string, string> = {
 export const SOURCE_LABELS: Record<string, string> = {
   manual_entry: "Manual entry",
   row_override: "Row override",
+  deleted_transaction: "Deleted transaction",
   manual_rule: "Manual rule",
   rule: "Built-in rule",
   llm: "Local AI model",
@@ -59,11 +61,17 @@ export const SOURCE_LABELS: Record<string, string> = {
 export const FIXED_COST_CATEGORIES = new Set([
   "education",
   "health",
+  "insurance",
   "housing",
   "subscriptions",
   "telecom",
   "utilities",
 ]);
+
+export const CATEGORY_ALIASES: Record<string, string> = {
+  bars_cafes: "restaurants_takeaway",
+  dining: "restaurants_takeaway",
+};
 
 export const CATEGORY_GROUP_MAP: Record<string, string> = {
   salary: "income",
@@ -71,8 +79,7 @@ export const CATEGORY_GROUP_MAP: Record<string, string> = {
   interest_dividend: "income",
   refund: "income",
   groceries: "expense",
-  dining: "expense",
-  bars_cafes: "expense",
+  restaurants_takeaway: "expense",
   transport: "expense",
   travel: "expense",
   shopping: "expense",
@@ -80,6 +87,8 @@ export const CATEGORY_GROUP_MAP: Record<string, string> = {
   software_ai: "expense",
   education: "expense",
   health: "expense",
+  insurance: "expense",
+  fitness_sports: "expense",
   housing: "expense",
   utilities: "expense",
   telecom: "expense",
@@ -94,14 +103,19 @@ export const CATEGORY_GROUP_MAP: Record<string, string> = {
   other: "other",
 };
 
-export const CATEGORY_THEME: Record<string, { solid: string; soft: string; text: string }> = {
+export type CategoryTheme = {
+  solid: string;
+  soft: string;
+  text: string;
+};
+
+export const CATEGORY_THEME: Record<string, CategoryTheme> = {
   salary: { solid: "#22c55e", soft: "rgba(34, 197, 94, 0.14)", text: "#8ef0b1" },
   bonus_cashback: { solid: "#14b8a6", soft: "rgba(20, 184, 166, 0.14)", text: "#7de9de" },
   interest_dividend: { solid: "#eab308", soft: "rgba(234, 179, 8, 0.14)", text: "#f6da74" },
   refund: { solid: "#38bdf8", soft: "rgba(56, 189, 248, 0.14)", text: "#8bdcff" },
   groceries: { solid: "#84cc16", soft: "rgba(132, 204, 22, 0.14)", text: "#b8ef62" },
-  dining: { solid: "#f97316", soft: "rgba(249, 115, 22, 0.14)", text: "#ffb07d" },
-  bars_cafes: { solid: "#fb7185", soft: "rgba(251, 113, 133, 0.14)", text: "#ffacb7" },
+  restaurants_takeaway: { solid: "#f97316", soft: "rgba(249, 115, 22, 0.14)", text: "#ffb07d" },
   transport: { solid: "#3b82f6", soft: "rgba(59, 130, 246, 0.14)", text: "#8fbaff" },
   travel: { solid: "#06b6d4", soft: "rgba(6, 182, 212, 0.14)", text: "#86f3ff" },
   shopping: { solid: "#a855f7", soft: "rgba(168, 85, 247, 0.14)", text: "#d6a8ff" },
@@ -109,6 +123,8 @@ export const CATEGORY_THEME: Record<string, { solid: string; soft: string; text:
   software_ai: { solid: "#8b5cf6", soft: "rgba(139, 92, 246, 0.14)", text: "#c8b2ff" },
   education: { solid: "#f59e0b", soft: "rgba(245, 158, 11, 0.14)", text: "#ffd17a" },
   health: { solid: "#10b981", soft: "rgba(16, 185, 129, 0.14)", text: "#86f0c7" },
+  insurance: { solid: "#22c1c3", soft: "rgba(34, 193, 195, 0.14)", text: "#90f1f2" },
+  fitness_sports: { solid: "#06b6a4", soft: "rgba(6, 182, 164, 0.14)", text: "#7de7da" },
   housing: { solid: "#60a5fa", soft: "rgba(96, 165, 250, 0.14)", text: "#b5d4ff" },
   utilities: { solid: "#0ea5e9", soft: "rgba(14, 165, 233, 0.14)", text: "#8fdcff" },
   telecom: { solid: "#6366f1", soft: "rgba(99, 102, 241, 0.14)", text: "#afb1ff" },
@@ -127,8 +143,27 @@ export function humanize(value: string): string {
   return value.replaceAll("_", " ").replaceAll("-", " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+export function normalizeCategoryKey(category: string | undefined | null): string {
+  const value = String(category ?? "").trim();
+  if (!value) {
+    return "";
+  }
+  return CATEGORY_ALIASES[value] ?? value;
+}
+
+export function isKnownCategory(category: string | undefined | null): boolean {
+  const normalized = normalizeCategoryKey(category);
+  return Boolean(normalized && CATEGORY_LABELS[normalized]);
+}
+
 export function categoryLabel(category: string): string {
-  return CATEGORY_LABELS[category] ?? humanize(category);
+  const normalized = normalizeCategoryKey(category);
+  return CATEGORY_LABELS[normalized] ?? humanize(normalized || category);
+}
+
+export function resolveCategoryTheme(category: string): CategoryTheme {
+  const normalized = normalizeCategoryKey(category);
+  return CATEGORY_THEME[normalized] ?? CATEGORY_THEME.other;
 }
 
 export function groupLabel(group: string): string {
@@ -144,7 +179,8 @@ export function sourceLabel(source: string): string {
 }
 
 export function deriveGroupFromCategory(category: string): string {
-  return CATEGORY_GROUP_MAP[category] ?? "other";
+  const normalized = normalizeCategoryKey(category);
+  return CATEGORY_GROUP_MAP[normalized] ?? "other";
 }
 
 export function deriveCashflowBucket(group: string, category: string): string {
@@ -184,7 +220,8 @@ export type CategoryOptionGroup = {
 
 function sortCategoryOptions(values: string[]): CategoryOption[] {
   return values
-    .filter((value, index, array) => CATEGORY_LABELS[value] && array.indexOf(value) === index)
+    .map((value) => normalizeCategoryKey(value))
+    .filter((value, index, array) => Boolean(CATEGORY_LABELS[value]) && array.indexOf(value) === index)
     .map((value) => ({ value, label: CATEGORY_LABELS[value] }))
     .sort((left, right) => left.label.localeCompare(right.label));
 }
@@ -193,8 +230,7 @@ export function buildCategoryOptionGroupsForAmount(amount?: number, currentCateg
   const incomeCategories = ["salary", "bonus_cashback", "interest_dividend", "refund"];
   const expenseCategories = [
     "groceries",
-    "dining",
-    "bars_cafes",
+    "restaurants_takeaway",
     "transport",
     "travel",
     "shopping",
@@ -202,6 +238,8 @@ export function buildCategoryOptionGroupsForAmount(amount?: number, currentCateg
     "software_ai",
     "education",
     "health",
+    "insurance",
+    "fitness_sports",
     "housing",
     "utilities",
     "telecom",
@@ -240,11 +278,12 @@ export function buildCategoryOptionGroupsForAmount(amount?: number, currentCateg
   }
 
   const alreadyIncluded = new Set(groups.flatMap((group) => group.options.map((option) => option.value)));
-  if (currentCategory && CATEGORY_LABELS[currentCategory] && !alreadyIncluded.has(currentCategory)) {
+  const normalizedCurrentCategory = normalizeCategoryKey(currentCategory);
+  if (normalizedCurrentCategory && CATEGORY_LABELS[normalizedCurrentCategory] && !alreadyIncluded.has(normalizedCurrentCategory)) {
     groups = [
       {
         label: "Current",
-        options: sortCategoryOptions([currentCategory]),
+        options: sortCategoryOptions([normalizedCurrentCategory]),
       },
       ...groups,
     ];

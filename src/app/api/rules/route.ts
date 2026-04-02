@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { deriveGroupFromCategory } from "@/lib/category-config";
+import { normalizeCategoryKey } from "@/lib/category-config";
 import { loadBaseDashboardData } from "@/lib/dashboard-data";
 import { loadManualRules, saveManualRules, type ManualRuleRecord } from "@/lib/config-store";
 import { matchesManualRule } from "@/lib/rule-matching";
@@ -15,7 +15,7 @@ function slug(value: string) {
 }
 
 function normalizeRule(input: Partial<ManualRuleRecord>): ManualRuleRecord {
-  const category = String(input.category ?? "other").trim() || "other";
+  const category = normalizeCategoryKey(input.category ?? "other") || "other";
   const pattern = String(input.pattern ?? "").trim();
   const baseName = input.name ?? pattern ?? category;
   const name = String(baseName).trim() || category;
@@ -27,12 +27,7 @@ function normalizeRule(input: Partial<ManualRuleRecord>): ManualRuleRecord {
     pattern,
     transactionType: String(input.transactionType ?? "").trim(),
     amountSign: String(input.amountSign ?? "").trim().toLowerCase(),
-    merchant: String(input.merchant ?? "").trim(),
-    group: String(input.group ?? deriveGroupFromCategory(category)).trim(),
     category,
-    subcategory: String(input.subcategory ?? "manual_rule").trim(),
-    confidence: Number(input.confidence ?? 0.99),
-    needsReview: Boolean(input.needsReview),
   };
 }
 

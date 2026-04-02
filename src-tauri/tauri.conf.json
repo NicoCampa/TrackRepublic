@@ -2,9 +2,9 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Track Republic",
   "version": "1.0.0",
-  "identifier": "com.nicolocampagnoli.cashflowtracker",
+  "identifier": "com.trackrepublic.desktop",
   "build": {
-    "frontendDist": "../src-tauri-placeholder",
+    "frontendDist": "../src-tauri-bootstrap",
     "devUrl": "http://127.0.0.1:3210",
     "beforeDevCommand": "npm run dev:desktop",
     "beforeBuildCommand": "npm run build:desktop"

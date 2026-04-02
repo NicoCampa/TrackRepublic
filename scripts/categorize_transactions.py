@@ -2,14 +2,13 @@
 
 import argparse
 import csv
-import html
+import hashlib
 import json
 import re
 import sys
 import time
-import urllib.error
-import urllib.parse
 import urllib.request
+import urllib.error
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,19 +19,18 @@ from typing import Optional
 
 
 OLLAMA_API_URL = "http://127.0.0.1:11434/api/chat"
-DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/?q={query}"
 DEFAULT_MODEL = "qwen3.5:9b"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANUAL_RULES = PROJECT_ROOT / "config" / "manual_category_rules.csv"
-ALLOWED_GROUPS = ["income", "expense", "transfer", "investment", "tax", "other"]
+DEFAULT_PROMPT_TEMPLATE_PATH = PROJECT_ROOT / "config" / "classifier_prompt_template.txt"
+DEFAULT_ASSET_CLASS_PROMPT_TEMPLATE_PATH = PROJECT_ROOT / "config" / "investment_asset_class_prompt_template.txt"
 ALLOWED_CATEGORIES = [
     "salary",
     "bonus_cashback",
     "interest_dividend",
     "refund",
     "groceries",
-    "dining",
-    "bars_cafes",
+    "restaurants_takeaway",
     "transport",
     "travel",
     "shopping",
@@ -40,6 +38,8 @@ ALLOWED_CATEGORIES = [
     "software_ai",
     "education",
     "health",
+    "insurance",
+    "fitness_sports",
     "housing",
     "utilities",
     "telecom",
@@ -53,54 +53,57 @@ ALLOWED_CATEGORIES = [
     "taxes",
     "other",
 ]
-SELF_NAME_HINTS = [
-    "NICOLO CAMPAGNOLI",
-    "NICOLO' CAMPAGNOLI",
-    "NICOLO CAMPAGNOLI",
-    "NICOLO CAMPAGNOLI",
-    "NICOLÒ CAMPAGNOLI",
-    "CAMPAGNOLI NICOLO",
+ALLOWED_ASSET_CLASSES = [
+    "etf",
+    "commodity",
+    "bond",
+    "private_market",
+    "stock",
+    "crypto",
+    "other",
 ]
+CATEGORY_ALIASES = {
+    "bars_cafes": "restaurants_takeaway",
+    "dining": "restaurants_takeaway",
+}
+CATEGORY_GROUP_MAP = {
+    "salary": "income",
+    "bonus_cashback": "income",
+    "interest_dividend": "income",
+    "refund": "income",
+    "groceries": "expense",
+    "restaurants_takeaway": "expense",
+    "transport": "expense",
+    "travel": "expense",
+    "shopping": "expense",
+    "subscriptions": "expense",
+    "software_ai": "expense",
+    "education": "expense",
+    "health": "expense",
+    "insurance": "expense",
+    "fitness_sports": "expense",
+    "housing": "expense",
+    "utilities": "expense",
+    "telecom": "expense",
+    "entertainment": "expense",
+    "gifts": "expense",
+    "fees": "expense",
+    "internal_transfer": "transfer",
+    "peer_transfer": "transfer",
+    "investing": "investment",
+    "crypto": "investment",
+    "taxes": "tax",
+    "other": "other",
+}
 FIXED_COST_CATEGORIES = {
     "education",
     "health",
+    "insurance",
     "housing",
     "subscriptions",
     "telecom",
     "utilities",
 }
-WEB_LOOKUP_SKIPPED_TYPES = {"Bonus", "Empfehlung", "Ertrag", "Handel", "Steuern", "Zinsen", "Überweisung"}
-WEB_QUERY_STOPWORDS = {
-    "APPLE",
-    "AUTHORIZED",
-    "BANKING",
-    "CARD",
-    "CARTE",
-    "CONTACTLESS",
-    "DEBIT",
-    "DIRECT",
-    "FROM",
-    "FUR",
-    "GOOGLE",
-    "INCOMING",
-    "KARTE",
-    "KARTENZAHLUNG",
-    "LASTSCHRIFT",
-    "ONLINE",
-    "OUTGOING",
-    "PAY",
-    "PAYMENT",
-    "POS",
-    "PURCHASE",
-    "REFERENCE",
-    "SEPA",
-    "TO",
-    "TRANSFER",
-    "UBERWEISUNG",
-    "VISA",
-}
-
-
 def english_output_name(value: str) -> str:
     translated = value
     translated = re.sub(r"(?i)kontoauszug", "statement", translated)
@@ -129,9 +132,7 @@ class ClassificationItem:
     tx_type: str
     sign: str
     description: str
-    normalized_description: str
-    example_amount: str
-    web_context: str = ""
+    amount_eur: str
 
 
 @dataclass(frozen=True)
@@ -142,38 +143,30 @@ class ManualRule:
     pattern: str
     transaction_type: str
     amount_sign: str
-    merchant: str
-    group: str
     category: str
-    subcategory: str
-    confidence: float
-    needs_review: bool
 
 
 @dataclass(frozen=True)
 class RowOverride:
     row_id: str
-    merchant: Optional[str]
-    group: Optional[str]
     category: Optional[str]
-    subcategory: Optional[str]
-    confidence: Optional[float]
-    needs_review: Optional[bool]
+    asset_class: Optional[str]
     source: Optional[str]
-    reason: Optional[str]
+    link_group_id: Optional[str]
+    link_role: Optional[str]
+    description: Optional[str]
+    transaction_type: Optional[str]
+    amount_sign: Optional[str]
 
     def has_changes(self) -> bool:
         return any(
             value is not None
             for value in (
-                self.merchant,
-                self.group,
                 self.category,
-                self.subcategory,
-                self.confidence,
-                self.needs_review,
+                self.asset_class,
                 self.source,
-                self.reason,
+                self.link_group_id,
+                self.link_role,
             )
         )
 
@@ -187,7 +180,7 @@ def parse_args() -> argparse.Namespace:
         help="Path to the *_transactions.csv file produced by convert_trade_republic_statement.py",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Ollama model name. Default: {DEFAULT_MODEL}")
-    parser.add_argument("--batch-size", type=int, default=20, help="Number of unique descriptions per LLM request.")
+    parser.add_argument("--batch-size", type=int, default=3, help="Number of unique descriptions per LLM request.")
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N rows. Useful for testing.")
     parser.add_argument(
         "--output-dir",
@@ -209,8 +202,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Path to a row override CSV keyed by row_id. Supported columns: "
-            "row_id, enabled, merchant, group, category, subcategory, confidence, "
-            "needs_review, source, reason."
+            "row_id, enabled, category, asset_class, source, "
+            "link_group_id, link_role."
         ),
     )
     parser.add_argument(
@@ -219,21 +212,23 @@ def parse_args() -> argparse.Namespace:
         help="Optional path for a pipeline summary JSON file.",
     )
     parser.add_argument(
-        "--disable-web-enrichment",
-        action="store_true",
-        help="Skip public web lookups for uncached merchants/products before LLM classification.",
+        "--prompt-addendum-file",
+        default=None,
+        help="Optional path to extra instructions appended to the built-in classifier prompt.",
     )
     parser.add_argument(
-        "--web-results",
-        type=int,
-        default=3,
-        help="Maximum number of DuckDuckGo results to include per unknown description.",
+        "--prompt-template-file",
+        default=None,
+        help=(
+            "Optional path to a prompt template override. "
+            "Supports {{response_example_json}}, {{taxonomy}}, and {{account_holder_hint}} placeholders. "
+            "Examples, extra instructions, and transactions are appended automatically."
+        ),
     )
     parser.add_argument(
-        "--web-timeout-seconds",
-        type=int,
-        default=8,
-        help="Timeout for each web lookup request.",
+        "--user-name",
+        default="",
+        help="Optional account holder name used to detect internal transfers mentioning the user's own name.",
     )
     return parser.parse_args()
 
@@ -264,14 +259,121 @@ def clean_optional_text(text: Optional[str]) -> Optional[str]:
     return value or None
 
 
-def parse_optional_float(text: Optional[str]) -> Optional[float]:
-    value = clean_optional_text(text)
-    if value is None:
+def normalize_category(category: Optional[str]) -> str:
+    value = (category or "").strip()
+    if not value:
+        return ""
+    return CATEGORY_ALIASES.get(value, value)
+
+
+def normalize_asset_class(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized == "gold":
+        return "commodity"
+    if normalized == "bond_etf":
+        return "etf"
+    if normalized in ALLOWED_ASSET_CLASSES:
+        return normalized
+    return "other"
+
+
+def derive_group_from_category(category: str) -> str:
+    return CATEGORY_GROUP_MAP.get(normalize_category(category), "other")
+
+
+def format_category_taxonomy_for_prompt() -> str:
+    category_descriptions = {
+        "salary": "payroll or employer salary income",
+        "bonus_cashback": "cashback, referral bonus, or other bonus income",
+        "interest_dividend": "interest payments or dividends",
+        "refund": "refunds, reimbursements, or money returned after a charge",
+        "groceries": "supermarkets, grocery stores, and staple household food shopping",
+        "restaurants_takeaway": "restaurants, cafes, bars, takeaway, food delivery, and similar food-out spending",
+        "transport": "everyday mobility such as trains, metro, buses, taxis, scooter sharing, or parking",
+        "travel": "flights, hotels, vacation bookings, and longer-distance travel spending",
+        "shopping": "general retail, e-commerce, clothes, home goods, and non-essential purchases",
+        "subscriptions": "recurring memberships or consumer subscriptions",
+        "software_ai": "software tools, SaaS, AI services, and digital work tools",
+        "education": "courses, tuition, books, certifications, and academic costs",
+        "health": "medical, pharmacy, therapy, and healthcare spending",
+        "insurance": "insurance premiums, policies, and insurance providers",
+        "fitness_sports": "gyms, sports memberships, exercise classes, and sport-related memberships",
+        "housing": "rent and direct housing costs",
+        "utilities": "electricity, water, heating, broadcasting fees, and similar household utilities",
+        "telecom": "phone, mobile plan, and internet bills",
+        "entertainment": "cinema, games, concerts, streaming add-ons, and leisure entertainment",
+        "gifts": "gifts, donations, and presents for others",
+        "fees": "bank fees, platform fees, penalties, commissions, or administrative charges",
+        "internal_transfer": "money moved between the user's own accounts",
+        "peer_transfer": "money sent to or received from another person",
+        "investing": "ETF, stock, broker, and non-crypto investment activity",
+        "crypto": "crypto trading, crypto purchases, and crypto platform activity",
+        "taxes": "tax payments, tax adjustments, and tax-related entries",
+        "other": "only use this when no category fits confidently",
+    }
+    return "\n".join(
+        f"- {category}: {category_descriptions[category]}"
+        for category in ALLOWED_CATEGORIES
+    )
+
+
+def format_asset_class_taxonomy_for_prompt() -> str:
+    asset_class_descriptions = {
+        "etf": "any listed ETF or UCITS ETF, including bond ETFs and index ETFs",
+        "commodity": "commodity exposure such as gold ETC, gold ETP, or physical-gold-like instrument",
+        "bond": "direct sovereign or corporate bond, note, or debenture",
+        "private_market": "private equity, private credit, venture, ELTIF, infrastructure, or similar private-market exposure",
+        "stock": "single-company equity or common stock",
+        "crypto": "crypto coin, token, or crypto ETP/ETN exposure",
+        "other": "use this when the transaction is not an investment trade or the asset type is unclear",
+    }
+    return "\n".join(
+        f"- {asset_class}: {asset_class_descriptions[asset_class]}"
+        for asset_class in ALLOWED_ASSET_CLASSES
+    )
+
+def load_prompt_addendum(path_value: Optional[str]) -> str:
+    if not path_value:
+        return ""
+    path = Path(path_value).expanduser().resolve()
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def load_prompt_template(path_value: Optional[str]) -> str:
+    if not path_value:
+        return ""
+    path = Path(path_value).expanduser().resolve()
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+DEFAULT_PROMPT_TEMPLATE = load_prompt_template(str(DEFAULT_PROMPT_TEMPLATE_PATH))
+DEFAULT_ASSET_CLASS_PROMPT_TEMPLATE = load_prompt_template(str(DEFAULT_ASSET_CLASS_PROMPT_TEMPLATE_PATH))
+
+
+def render_prompt_template(template: str, values: dict[str, str]) -> str:
+    rendered = template
+    for key, value in values.items():
+        rendered = rendered.replace(f"{{{{{key}}}}}", value)
+    return rendered.strip()
+
+
+def derive_amount_sign(value: Optional[str]) -> Optional[str]:
+    text = clean_optional_text(value)
+    if text is None:
         return None
     try:
-        return float(value)
-    except ValueError as exc:
-        raise ValueError(f"Invalid float value: {text}") from exc
+        amount = parse_decimal(text)
+    except ValueError:
+        return None
+    if amount > 0:
+        return "income"
+    if amount < 0:
+        return "expense"
+    return "zero"
 
 
 def timestamp_now() -> str:
@@ -329,15 +431,26 @@ def load_manual_rules(path: Path) -> list[ManualRule]:
                     pattern=pattern,
                     transaction_type=(row.get("transaction_type") or "").strip(),
                     amount_sign=(row.get("amount_sign") or "").strip().lower(),
-                    merchant=(row.get("merchant") or "").strip() or pattern,
-                    group=(row.get("group") or "other").strip(),
-                    category=(row.get("category") or "other").strip(),
-                    subcategory=(row.get("subcategory") or "").strip() or "manual_rule",
-                    confidence=float((row.get("confidence") or "0.99").strip() or "0.99"),
-                    needs_review=parse_bool(row.get("needs_review") or "", default=False),
+                    category=normalize_category(row.get("category") or "other") or "other",
                 )
             )
     return rules
+
+
+def normalize_link_role(value: Optional[str]) -> Optional[str]:
+    normalized = (value or "").strip().lower()
+    if normalized in {"net", "member"}:
+        return normalized
+    return None
+
+
+def extract_legacy_link_metadata(subcategory: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    value = (subcategory or "").strip()
+    if value.startswith("connected_expense_net:"):
+        return ((value.removeprefix("connected_expense_net:").strip() or None), "net")
+    if value.startswith("connected_expense_member:"):
+        return ((value.removeprefix("connected_expense_member:").strip() or None), "member")
+    return (None, None)
 
 
 def load_row_overrides(path: Path) -> dict[str, RowOverride]:
@@ -356,17 +469,24 @@ def load_row_overrides(path: Path) -> dict[str, RowOverride]:
             if not parse_bool(row.get("enabled") or "", default=True):
                 continue
 
-            needs_review_text = clean_optional_text(row.get("needs_review"))
+            link_group_id = clean_optional_text(row.get("link_group_id"))
+            link_role = normalize_link_role(row.get("link_role"))
+            if link_group_id is None and link_role is None:
+                link_group_id, link_role = extract_legacy_link_metadata(row.get("subcategory"))
             override = RowOverride(
                 row_id=row_id,
-                merchant=clean_optional_text(row.get("merchant")),
-                group=clean_optional_text(row.get("group")),
-                category=clean_optional_text(row.get("category")),
-                subcategory=clean_optional_text(row.get("subcategory")),
-                confidence=parse_optional_float(row.get("confidence")),
-                needs_review=parse_bool(needs_review_text, default=False) if needs_review_text is not None else None,
+                category=normalize_category(clean_optional_text(row.get("category"))) or None,
+                asset_class=(
+                    normalize_asset_class(row.get("asset_class"))
+                    if clean_optional_text(row.get("asset_class")) is not None
+                    else None
+                ),
                 source=clean_optional_text(row.get("source")),
-                reason=clean_optional_text(row.get("reason")),
+                link_group_id=link_group_id,
+                link_role=link_role,
+                description=clean_optional_text(row.get("description")),
+                transaction_type=clean_optional_text(row.get("transaction_type")),
+                amount_sign=derive_amount_sign(row.get("signed_amount")),
             )
             if override.has_changes():
                 overrides[row_id] = override
@@ -393,474 +513,139 @@ def build_cache_key(row: TransactionRow) -> str:
     return f"{row.tx_type}|{sign}|{normalized}"
 
 
-def should_attempt_web_lookup(item: ClassificationItem) -> bool:
-    normalized = item.normalized_description.upper()
-    if item.tx_type in WEB_LOOKUP_SKIPPED_TYPES:
-        return False
-    if item.sign == "zero":
-        return False
-    if looks_like_self_transfer(normalized):
-        return False
-    return not (
-        normalized.startswith("INCOMING TRANSFER FROM ")
-        or normalized.startswith("OUTGOING TRANSFER FOR ")
-    )
-
-
-def build_web_search_query(item: ClassificationItem) -> Optional[str]:
-    candidate = (item.normalized_description or item.description).upper()
-    candidate = re.sub(
-        r"^(APPLE PAY|CARD (?:PAYMENT|PURCHASE)|DIRECT DEBIT|GOOGLE PAY|LASTSCHRIFT|ONLINE PAYMENT|POS|SEPA(?: DIRECT DEBIT| TRANSFER)?|VISA)\s+",
-        "",
-        candidate,
-    )
-    candidate = re.sub(r"\b[A-Z]{2}\d{2}[A-Z0-9]{8,}\b", " ", candidate)
-    candidate = re.sub(r"\b[A-Z0-9*:/._-]*\d[A-Z0-9*:/._-]{5,}\b", " ", candidate)
-    candidate = re.sub(r"[^A-Z0-9&+./ -]", " ", candidate)
-
-    tokens: list[str] = []
-    for raw_token in candidate.split():
-        token = raw_token.strip(" -./")
-        if len(token) <= 2:
-            continue
-        if token in WEB_QUERY_STOPWORDS:
-            continue
-        if re.fullmatch(r"\d+", token):
-            continue
-        tokens.append(token)
-
-    if not tokens:
-        return None
-    query = " ".join(tokens[:6]).strip()
-    return query or None
-
-
-def strip_html(text: str) -> str:
-    without_tags = re.sub(r"<[^>]+>", " ", text)
-    normalized = html.unescape(without_tags)
-    return re.sub(r"\s+", " ", normalized).strip()
-
-
-def resolve_search_result_url(raw_url: str) -> str:
-    decoded = html.unescape(raw_url).strip()
-    if decoded.startswith("//"):
-        decoded = f"https:{decoded}"
-    parsed = urllib.parse.urlparse(decoded)
-    query = urllib.parse.parse_qs(parsed.query)
-    uddg = query.get("uddg")
-    if uddg:
-        return urllib.parse.unquote(uddg[0]).strip()
-    return decoded
-
-
-def search_duckduckgo(query: str, timeout_seconds: int, max_results: int) -> list[dict[str, str]]:
-    request = urllib.request.Request(
-        DUCKDUCKGO_HTML_URL.format(query=urllib.parse.quote_plus(query)),
-        headers={"User-Agent": "Mozilla/5.0"},
-    )
-    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-        document = response.read().decode("utf-8", "ignore")
-
-    pattern = re.compile(
-        r'class="result__a" href="(?P<href>[^"]+)">(?P<title>.*?)</a>.*?class="result__snippet"[^>]*>(?P<snippet>.*?)</a>',
-        re.IGNORECASE | re.DOTALL,
-    )
-    results: list[dict[str, str]] = []
-    seen_urls: set[str] = set()
-    for match in pattern.finditer(document):
-        url = resolve_search_result_url(match.group("href"))
-        if not url or url in seen_urls:
-            continue
-        title = strip_html(match.group("title"))
-        snippet = strip_html(match.group("snippet"))
-        if not title or not snippet:
-            continue
-        seen_urls.add(url)
-        results.append({"title": title, "snippet": snippet, "url": url})
-        if len(results) >= max_results:
-            break
-    return results
-
-
-def build_web_context(item: ClassificationItem, timeout_seconds: int, max_results: int) -> str:
-    query = build_web_search_query(item)
-    if query is None:
-        return ""
-    try:
-        results = search_duckduckgo(query, timeout_seconds=timeout_seconds, max_results=max_results)
-    except (TimeoutError, urllib.error.URLError, ValueError):
-        return ""
-
-    if not results:
-        return ""
-
-    lines: list[str] = []
-    for index, result in enumerate(results, start=1):
-        hostname = urllib.parse.urlparse(result["url"]).netloc.removeprefix("www.")
-        snippet = result["snippet"]
-        if len(snippet) > 180:
-            snippet = f"{snippet[:177].rstrip()}..."
-        lines.append(f"{index}. {result['title']} — {snippet} ({hostname})")
-    return f"Search query: {query}\n" + "\n".join(lines)
-
-
-def enrich_items_with_web_context(
-    items: list[ClassificationItem], timeout_seconds: int, max_results: int
-) -> tuple[list[ClassificationItem], dict[str, int]]:
-    query_cache: dict[str, str] = {}
-    enriched_items: list[ClassificationItem] = []
-    query_count = 0
-    enriched_count = 0
-
-    for item in items:
-        if not should_attempt_web_lookup(item):
-            enriched_items.append(item)
-            continue
-
-        query = build_web_search_query(item)
-        if query is None:
-            enriched_items.append(item)
-            continue
-
-        if query not in query_cache:
-            query_count += 1
-            query_cache[query] = build_web_context(item, timeout_seconds=timeout_seconds, max_results=max_results)
-        web_context = query_cache[query]
-        if web_context:
-            enriched_count += 1
-        enriched_items.append(
-            ClassificationItem(
-                cache_key=item.cache_key,
-                tx_type=item.tx_type,
-                sign=item.sign,
-                description=item.description,
-                normalized_description=item.normalized_description,
-                example_amount=item.example_amount,
-                web_context=web_context,
-            )
-        )
-
-    return enriched_items, {"queries": query_count, "enriched": enriched_count}
-
-
 def default_classification(
-    group: str,
     category: str,
-    merchant: str,
-    subcategory: str,
-    confidence: float,
-    needs_review: bool,
-    reason: str,
     source: str,
 ) -> dict:
+    normalized_category = normalize_category(category) or "other"
     return {
-        "merchant": merchant,
-        "group": group,
-        "category": category,
-        "subcategory": subcategory,
-        "confidence": round(confidence, 2),
-        "needs_review": needs_review,
-        "reason": reason,
+        "category": normalized_category,
         "source": source,
     }
 
 
-def looks_like_self_transfer(description_upper: str) -> bool:
-    return any(name in description_upper for name in SELF_NAME_HINTS)
+def normalize_cached_classification(raw: dict) -> dict:
+    category = normalize_category(raw.get("category", "other")) or "other"
+    if category not in ALLOWED_CATEGORIES:
+        category = "other"
+
+    source = clean_optional_text(raw.get("source")) or "llm"
+    asset_class = normalize_asset_class(raw.get("asset_class", "other"))
+    if category == "crypto":
+        asset_class = "crypto"
+    elif category != "investing":
+        asset_class = "other"
+
+    return {
+        "category": category,
+        "asset_class": asset_class,
+        "source": source,
+    }
 
 
-def match_manual_rule(row: TransactionRow, rules: list[ManualRule]) -> Optional[dict]:
-    description = row.description
-    description_upper = description.upper()
-    normalized = normalize_description_for_classification(description)
-    sign = "income" if row.signed_amount > 0 else "expense" if row.signed_amount < 0 else "zero"
+def build_prompt_examples(
+    manual_rules: list[ManualRule],
+    row_overrides: dict[str, RowOverride],
+    limit: int = 12,
+) -> list[dict[str, str]]:
+    examples: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
 
-    for rule in rules:
-        if rule.transaction_type and rule.transaction_type != row.tx_type:
-            continue
-        if rule.amount_sign and rule.amount_sign != sign:
-            continue
-
-        matched = False
-        if rule.match_type == "contains":
-            matched = rule.pattern.upper() in description_upper
-        elif rule.match_type == "exact":
-            matched = normalize_description_for_classification(rule.pattern) == normalized
-        elif rule.match_type == "regex":
-            matched = re.search(rule.pattern, description, re.IGNORECASE) is not None
-        if not matched:
-            continue
-
-        confidence = min(max(rule.confidence, 0.0), 0.99)
-        rule_label = rule.rule_id or rule.name
-        return default_classification(
-            group=rule.group if rule.group in ALLOWED_GROUPS else "other",
-            category=rule.category if rule.category in ALLOWED_CATEGORIES else "other",
-            merchant=rule.merchant,
-            subcategory=rule.subcategory,
-            confidence=confidence,
-            needs_review=rule.needs_review,
-            reason=f"Manual rule matched: {rule_label}",
-            source="manual_rule",
+    def add_example(tx_type: Optional[str], sign: Optional[str], description: Optional[str], category: Optional[str]) -> None:
+        normalized_category = normalize_category(category) or "other"
+        normalized_description = clean_optional_text(description)
+        normalized_type = clean_optional_text(tx_type) or ""
+        if (
+            not normalized_description
+            or normalized_category not in ALLOWED_CATEGORIES
+            or normalized_category == "other"
+        ):
+            return
+        dedupe_key = (
+            normalized_type,
+            normalize_description_for_classification(normalized_description),
+            normalized_category,
         )
-    return None
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        example = {
+            "description": normalized_description,
+            "category": normalized_category,
+        }
+        if normalized_type:
+            example["type"] = normalized_type
+        examples.append(example)
+
+    for override in row_overrides.values():
+        add_example(override.transaction_type, override.amount_sign, override.description, override.category)
+        if len(examples) >= limit:
+            return examples[:limit]
+
+    for rule in manual_rules:
+        if rule.match_type == "regex":
+            continue
+        add_example(rule.transaction_type, rule.amount_sign, rule.pattern, rule.category)
+        if len(examples) >= limit:
+            return examples[:limit]
+
+    return examples[:limit]
 
 
 def apply_row_override(classification: dict, override: RowOverride) -> dict:
     updated = dict(classification)
 
-    if override.merchant is not None:
-        updated["merchant"] = override.merchant
-    if override.group is not None:
-        updated["group"] = override.group if override.group in ALLOWED_GROUPS else "other"
     if override.category is not None:
         updated["category"] = override.category if override.category in ALLOWED_CATEGORIES else "other"
-    if override.subcategory is not None:
-        updated["subcategory"] = override.subcategory
-    if override.confidence is not None:
-        updated["confidence"] = round(min(max(override.confidence, 0.0), 1.0), 2)
-    if override.needs_review is not None:
-        updated["needs_review"] = override.needs_review
+
+    if override.asset_class is not None:
+        if updated["category"] == "crypto":
+            updated["asset_class"] = "crypto"
+        elif updated["category"] == "investing":
+            updated["asset_class"] = normalize_asset_class(override.asset_class)
+        else:
+            updated["asset_class"] = "other"
 
     updated["source"] = override.source or "row_override"
-    updated["reason"] = override.reason or f"Row override applied for {override.row_id}"
     return updated
 
 
-GENERIC_MERCHANT_LABELS = {
-    "Groceries",
-    "Dining",
-    "Bar",
-    "Transport",
-    "AI Software",
-    "Health",
-    "Retail",
-    "Refund",
-    "Broadcast Fee",
-}
+def build_prompt_fingerprint(
+    prompt_template: str,
+    asset_class_prompt_template: str,
+    prompt_addendum: str,
+    account_holder_name: str,
+    prompt_examples: list[dict[str, str]],
+) -> str:
+    payload = {
+        "classifier_mode": "llm_only_v4_two_step_asset_class",
+        "template": prompt_template.strip() or DEFAULT_PROMPT_TEMPLATE,
+        "asset_class_template": asset_class_prompt_template.strip() or DEFAULT_ASSET_CLASS_PROMPT_TEMPLATE,
+        "addendum": prompt_addendum.strip(),
+        "account_holder_name": re.sub(r"\s+", " ", account_holder_name).strip(),
+        "examples": prompt_examples,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
-def match_keyword_rule(row: TransactionRow, rules: list[tuple[list[str], str, str, str, str]]) -> Optional[dict]:
-    description_upper = row.description.upper()
-    for keywords, merchant, group, category, subcategory in rules:
-        if any(keyword in description_upper for keyword in keywords):
-            resolved_merchant = row.description if merchant in GENERIC_MERCHANT_LABELS else merchant
-            return default_classification(
-                group=group,
-                category=category,
-                merchant=resolved_merchant,
-                subcategory=subcategory,
-                confidence=0.97,
-                needs_review=False,
-                reason=f"Merchant keyword rule matched: {', '.join(keywords)}",
-                source="rule",
-            )
-    return None
-
-
-def classify_rule_based(row: TransactionRow) -> Optional[dict]:
-    description_upper = row.description.upper()
-    amount_sign = "buy" if row.signed_amount < 0 else "sell" if row.signed_amount > 0 else "flat"
-
-    if row.tx_type == "Handel":
-        if any(token in description_upper for token in ["BTC", "ETH", "XF000BTC0017", "XF000ETH0019"]):
-            return default_classification(
-                group="investment",
-                category="crypto",
-                merchant="Trade Republic",
-                subcategory=amount_sign,
-                confidence=0.99,
-                needs_review=False,
-                reason="Trade execution mentioning BTC/ETH or crypto instruments.",
-                source="rule",
-            )
-        return default_classification(
-            group="investment",
-            category="investing",
-            merchant="Trade Republic",
-            subcategory=amount_sign,
-            confidence=0.99,
-            needs_review=False,
-            reason="Trade execution for securities or funds.",
-            source="rule",
-        )
-
-    if row.tx_type == "Steuern":
-        return default_classification(
-            group="tax",
-            category="taxes",
-            merchant="Tax Authority",
-            subcategory="investment_tax",
-            confidence=0.98,
-            needs_review=False,
-            reason="Explicit tax entry.",
-            source="rule",
-        )
-
-    if row.tx_type == "Zinsen":
-        return default_classification(
-            group="income",
-            category="interest_dividend",
-            merchant="Trade Republic",
-            subcategory="interest",
-            confidence=0.98,
-            needs_review=False,
-            reason="Interest payment.",
-            source="rule",
-        )
-
-    if row.tx_type == "Ertrag":
-        return default_classification(
-            group="income",
-            category="interest_dividend",
-            merchant="Trade Republic",
-            subcategory="dividend",
-            confidence=0.98,
-            needs_review=False,
-            reason="Dividend or cash yield payment.",
-            source="rule",
-        )
-
-    if row.tx_type == "Bonus":
-        return default_classification(
-            group="income",
-            category="bonus_cashback",
-            merchant="Trade Republic",
-            subcategory="saveback",
-            confidence=0.98,
-            needs_review=False,
-            reason="Bonus or saveback payment.",
-            source="rule",
-        )
-
-    if row.tx_type == "Empfehlung":
-        return default_classification(
-            group="income",
-            category="refund",
-            merchant="Trade Republic",
-            subcategory="referral_or_reimbursement",
-            confidence=0.92,
-            needs_review=False,
-            reason="Referral or reimbursement payment.",
-            source="rule",
-        )
-
-    if row.tx_type == "Überweisung":
-        if "EINZAHLUNG AKZEPTIERT" in description_upper or "TOP UP" in description_upper:
-            return default_classification(
-                group="transfer",
-                category="internal_transfer",
-                merchant="Own Account",
-                subcategory="top_up_or_deposit",
-                confidence=0.99,
-                needs_review=False,
-                reason="Explicit deposit/top-up wording.",
-                source="rule",
-            )
-        if looks_like_self_transfer(description_upper):
-            return default_classification(
-                group="transfer",
-                category="internal_transfer",
-                merchant="Own Account",
-                subcategory="self_transfer",
-                confidence=0.99,
-                needs_review=False,
-                reason="Transfer references the user's own name.",
-                source="rule",
-            )
-        if "INCOMING TRANSFER FROM CAPGEMINI" in description_upper:
-            return default_classification(
-                group="income",
-                category="salary",
-                merchant="Capgemini",
-                subcategory="payroll",
-                confidence=0.99,
-                needs_review=False,
-                reason="Incoming transfer from employer.",
-                source="rule",
-            )
-        if "OUTGOING TRANSFER FOR LMU MUENCHEN" in description_upper or "DEUTSCHKURSE BEI DER UNIVERSITAET MUENCHEN" in description_upper:
-            return default_classification(
-                group="expense",
-                category="education",
-                merchant="LMU Muenchen",
-                subcategory="tuition_or_course",
-                confidence=0.96,
-                needs_review=False,
-                reason="University or language-course transfer.",
-                source="rule",
-            )
-        if "INCOMING TRANSFER FROM APPLE INC" in description_upper or "INCOMING TRANSFER FROM TECHNIKER KRANKENKASSE" in description_upper:
-            return default_classification(
-                group="income",
-                category="refund",
-                merchant="Refund",
-                subcategory="institutional_refund",
-                confidence=0.93,
-                needs_review=False,
-                reason="Incoming transfer from a company or insurer that is typically a refund.",
-                source="rule",
-            )
-        if "INCOMING TRANSFER FROM STOK BAY F FINANZAMT" in description_upper or "INCOMING TRANSFER FROM FINANZAMT" in description_upper:
-            return default_classification(
-                group="tax",
-                category="taxes",
-                merchant="Finanzamt",
-                subcategory="tax_refund",
-                confidence=0.93,
-                needs_review=False,
-                reason="Incoming transfer from tax authority.",
-                source="rule",
-            )
-        if (
-            description_upper.startswith("INCOMING TRANSFER FROM ")
-            or description_upper.startswith("OUTGOING TRANSFER FOR ")
-        ):
-            return default_classification(
-                group="transfer",
-                category="peer_transfer",
-                merchant=row.description.split(" ", 3)[-1],
-                subcategory="person_to_person",
-                confidence=0.85,
-                needs_review=False,
-                reason="Named counterparty transfer without self-transfer markers.",
-                source="rule",
-            )
-
-    merchant_rules = [
-        (["PENNY", "LIDL", "REWE", "EDEKA", "GO ASIA", "COOP", "CONAD", "SUPERMERCATO"], "Groceries", "expense", "groceries", "supermarket"),
-        (["MCDONALD", "MAMMA BAO", "YORMA", "WOLT", "UBER *EATS", "KFC", "RESTAURANT", "RISTOGEST", "SUMUP *BITES", "AUTOGRILL", "IMBISS", "LS PLEX COFFEE"], "Dining", "expense", "dining", "food_and_drink"),
-        (["KILIANS IRISH PUB", "PUB", "BAR"], "Bar", "expense", "bars_cafes", "bar_or_pub"),
-        (["BOLT", "TRAINLINE", "DB VERTRIEB", "TRENITALIA", "LUFTHANSA", "ITALOTRENO", "METRO DE MADRID", "EMMY SHARING", "APCOA", "HANDYPARKEN", "UBER *LIME", "MUE VERKEHRSGESELLS", "MUENCHNER VERKEHRSGE", "TPER SPA"], "Transport", "expense", "transport", "mobility"),
-        (["OPENAI", "CLAUDE.AI", "CURSOR"], "AI Software", "expense", "software_ai", "software_subscription"),
-        (["ILIAD"], "Iliad", "expense", "telecom", "mobile_plan"),
-        (["TECHNIKER KRANKENKASSE", "UNOBRAVO"], "Health", "expense", "health", "healthcare"),
-        (["AMAZON", "AMZN", "WOOLWORTH", "DECATHLON", "PUMA", "IKEA", "DM-DROGERIE"], "Retail", "expense", "shopping", "retail"),
-        (["GETSAFE"], "Getsafe", "expense", "utilities", "insurance"),
-        (["AMAZON PRIME"], "Amazon Prime", "expense", "subscriptions", "media_subscription"),
-        (["STUDIERENDENWERK"], "Studierendenwerk", "expense", "dining", "student_cafeteria"),
-        (["RUNDUNK", "RUNDFUNK ARD", "ZDF"], "Broadcast Fee", "expense", "utilities", "public_fee"),
-        (["TAXFIX"], "Taxfix", "tax", "taxes", "tax_service"),
-    ]
-    merchant_rule = match_keyword_rule(row, merchant_rules)
-    if merchant_rule is not None:
-        return merchant_rule
-
-    return None
-
-
-def load_cache(path: Path, refresh_cache: bool) -> dict[str, dict]:
+def load_cache(path: Path, refresh_cache: bool, model: str, prompt_fingerprint: str) -> dict[str, dict]:
     if refresh_cache or not path.exists():
         return {}
     with path.open(encoding="utf-8") as handle:
         payload = json.load(handle)
+    if payload.get("model") != model:
+        return {}
+    if payload.get("prompt_fingerprint") != prompt_fingerprint:
+        return {}
     return payload.get("entries", {})
 
 
-def save_cache(path: Path, model: str, entries: dict[str, dict]) -> None:
+def save_cache(path: Path, model: str, prompt_fingerprint: str, entries: dict[str, dict]) -> None:
     payload = {
-        "version": 1,
+        "version": 2,
         "model": model,
+        "prompt_fingerprint": prompt_fingerprint,
         "updated_at_epoch": int(time.time()),
         "entries": entries,
     }
@@ -868,42 +653,39 @@ def save_cache(path: Path, model: str, entries: dict[str, dict]) -> None:
         json.dump(payload, handle, indent=2, ensure_ascii=False, sort_keys=True)
 
 
-def sanitize_classification(raw: dict, fallback_description: str, used_web_context: bool = False) -> dict:
-    group = raw.get("group", "other")
-    category = raw.get("category", "other")
-    merchant = str(raw.get("merchant", "")).strip() or fallback_description
-    subcategory = ""
-    reason = "Classification came from the local LLM with public web context." if used_web_context else "Classification came from the local LLM."
-    confidence = 0.82
+def sanitize_category_classification(raw: dict) -> dict:
+    category = normalize_category(raw.get("category", "other")) or "other"
 
-    if group not in ALLOWED_GROUPS:
-        group = "other"
-        confidence = min(confidence, 0.4)
     if category not in ALLOWED_CATEGORIES:
         category = "other"
-        confidence = min(confidence, 0.4)
-
-    needs_review = group == "other" or category == "other" or confidence < 0.65
 
     return {
-        "merchant": merchant,
-        "group": group,
         "category": category,
-        "subcategory": subcategory,
-        "confidence": round(confidence, 2),
-        "needs_review": needs_review,
-        "reason": reason,
-        "source": "llm_web" if used_web_context else "llm",
+        "source": "llm",
     }
 
 
-def ollama_chat(model: str, prompt: str, timeout_seconds: int) -> str:
+def sanitize_asset_class_classification(raw: dict, category: str) -> dict:
+    normalized_category = normalize_category(category) or "other"
+    asset_class = normalize_asset_class(raw.get("asset_class", "other"))
+    if normalized_category == "crypto":
+        asset_class = "crypto"
+    elif normalized_category != "investing":
+        asset_class = "other"
+
+    return {
+        "asset_class": asset_class,
+        "source": "llm",
+    }
+
+
+def ollama_chat(model: str, prompt: str, response_schema: dict, timeout_seconds: int) -> str:
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "think": False,
         "stream": False,
-        "format": "json",
+        "format": response_schema,
         "options": {
             "temperature": 0,
             "num_predict": 900,
@@ -919,57 +701,149 @@ def ollama_chat(model: str, prompt: str, timeout_seconds: int) -> str:
     return decoded["message"]["content"]
 
 
-def build_prompt(items: list[ClassificationItem]) -> str:
+def build_category_prompt(
+    items: list[ClassificationItem],
+    prompt_template: str = "",
+    prompt_addendum: str = "",
+    account_holder_name: str = "",
+    prompt_examples: Optional[list[dict[str, str]]] = None,
+) -> str:
     example_shape = {
         "results": [
             {
-                "id": "example-1",
-                "merchant": "OPENAI",
-                "group": "expense",
+                "id": "1",
                 "category": "software_ai",
             }
         ]
     }
-    payload = [
-        {
-            "id": item.cache_key,
-            "type": item.tx_type,
-            "sign": item.sign,
-            "description": item.description,
-            "normalized_description": item.normalized_description,
-            "example_amount_eur": item.example_amount,
-            "web_context": item.web_context or "",
-        }
-        for item in items
-    ]
-    return (
-        "You categorize personal finance transactions for a monthly and yearly cashflow dashboard.\n"
-        "Return exactly one JSON object and no markdown.\n"
-        f"The JSON must match this shape: {json.dumps(example_shape, ensure_ascii=False)}\n"
-        f"Allowed groups: {', '.join(ALLOWED_GROUPS)}.\n"
-        f"Allowed categories: {', '.join(ALLOWED_CATEGORIES)}.\n"
-        "Rules:\n"
-        "- The user is Nicolo Campagnoli.\n"
-        "- Transfers involving Nicolo Campagnoli or CAMPAGNOLI NICOLO' are internal transfers.\n"
-        "- Top-ups, deposits, and money moved between own accounts are transfer/internal_transfer.\n"
-        "- Company payroll transfers are income/salary.\n"
-        "- Refunds or reimbursements are income/refund.\n"
-        "- AI software like OpenAI or Claude is expense/software_ai.\n"
-        "- Restaurants, bars, pubs, takeaway, cafes, or food delivery are dining or bars_cafes.\n"
-        "- Supermarkets and grocery stores are groceries.\n"
-        "- Mobility, trains, flights, public transit, taxis, scooter sharing, and parking are transport or travel.\n"
-        "- Brokerage, ETF, stock, BTC, ETH, or crypto trading is investment.\n"
-        "- Use short, stable merchant names in merchant.\n"
-        "- If web_context is present, use it to identify the brand, merchant, or product behind unclear bank descriptors.\n"
-        "- Prefer web_context when it clearly identifies a service or merchant that the raw transaction text does not explain well.\n"
-        "- If web_context is empty or inconclusive, classify only from the transaction text.\n"
-        f"Transactions:\n{json.dumps(payload, ensure_ascii=False)}"
+    payload = []
+    for index, item in enumerate(items, start=1):
+        payload.append(
+            {
+                "id": str(index),
+                "type": item.tx_type,
+                "description": item.description,
+                "amount_eur": item.amount_eur,
+            }
+        )
+    extra_instructions = prompt_addendum.strip()
+    extra_block = (
+        f"Run-specific extra instructions:\n{extra_instructions}\n"
+        if extra_instructions
+        else ""
     )
+    account_holder = re.sub(r"\s+", " ", account_holder_name).strip()
+    account_holder_block = (
+        f"Account holder hint:\n- The user's name for this run is {json.dumps(account_holder, ensure_ascii=False)}.\n"
+        "- Transactions that clearly mention that same person as sender or recipient are usually internal_transfer.\n"
+        if account_holder
+        else ""
+    )
+    prompt_template_value = prompt_template.strip() or DEFAULT_PROMPT_TEMPLATE
+    static_prompt = render_prompt_template(
+        prompt_template_value,
+        {
+            "response_example_json": json.dumps(example_shape, ensure_ascii=False),
+            "taxonomy": format_category_taxonomy_for_prompt(),
+            "account_holder_hint": account_holder_block,
+        },
+    )
+    prompt_examples = prompt_examples or []
+    examples_block = (
+        "Examples from prior manual corrections and rules:\n"
+        f"{json.dumps(prompt_examples, ensure_ascii=False)}\n"
+        if prompt_examples
+        else ""
+    )
+    parts = [static_prompt]
+    if examples_block:
+        parts.append(examples_block.strip())
+    if extra_block:
+        parts.append(extra_block.strip())
+    parts.append(f"Transactions:\n{json.dumps(payload, ensure_ascii=False)}")
+    return "\n\n".join(part for part in parts if part)
 
 
-def call_llm_batch(model: str, items: list[ClassificationItem]) -> dict[str, dict]:
-    prompt = build_prompt(items)
-    content = ollama_chat(model=model, prompt=prompt, timeout_seconds=240)
+def build_asset_class_prompt(
+    items: list[ClassificationItem],
+    prompt_addendum: str = "",
+    asset_class_prompt_template: str = "",
+) -> str:
+    example_shape = {
+        "results": [
+            {
+                "id": "1",
+                "asset_class": "etf",
+            }
+        ]
+    }
+    payload = []
+    for index, item in enumerate(items, start=1):
+        payload.append(
+            {
+                "id": str(index),
+                "category": item.sign,
+                "type": item.tx_type,
+                "description": item.description,
+                "amount_eur": item.amount_eur,
+            }
+        )
+    extra_instructions = prompt_addendum.strip()
+    extra_block = (
+        f"Run-specific extra instructions:\n{extra_instructions}\n"
+        if extra_instructions
+        else ""
+    )
+    prompt_template_value = asset_class_prompt_template.strip() or DEFAULT_ASSET_CLASS_PROMPT_TEMPLATE
+    static_prompt = render_prompt_template(
+        prompt_template_value,
+        {
+            "response_example_json": json.dumps(example_shape, ensure_ascii=False),
+            "asset_class_taxonomy": format_asset_class_taxonomy_for_prompt(),
+        },
+    )
+    parts = [static_prompt]
+    if extra_block:
+        parts.append(extra_block.strip())
+    parts.append(f"Investment transactions:\n{json.dumps(payload, ensure_ascii=False)}")
+    return "\n\n".join(part for part in parts if part)
+
+
+def call_category_llm_batch(
+    model: str,
+    items: list[ClassificationItem],
+    prompt_template: str = "",
+    prompt_addendum: str = "",
+    account_holder_name: str = "",
+    prompt_examples: Optional[list[dict[str, str]]] = None,
+) -> dict[str, dict]:
+    response_schema = {
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "category": {"type": "string", "enum": ALLOWED_CATEGORIES},
+                    },
+                    "required": ["id", "category"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["results"],
+        "additionalProperties": False,
+    }
+    prompt = build_category_prompt(
+        items,
+        prompt_template=prompt_template,
+        prompt_addendum=prompt_addendum,
+        account_holder_name=account_holder_name,
+        prompt_examples=prompt_examples,
+    )
+    content = ollama_chat(model=model, prompt=prompt, response_schema=response_schema, timeout_seconds=240)
     parsed = json.loads(content)
     if isinstance(parsed, list):
         results = parsed
@@ -979,22 +853,14 @@ def call_llm_batch(model: str, items: list[ClassificationItem]) -> dict[str, dic
         raise ValueError("LLM response did not contain a results array.")
 
     by_id: dict[str, dict] = {}
-    item_by_id = {item.cache_key: item for item in items}
+    item_by_id = {str(index): item for index, item in enumerate(items, start=1)}
     for item in results:
         if not isinstance(item, dict) or "id" not in item:
             continue
         item_id = str(item["id"])
-        source_item = item_by_id.get(item_id)
-        fallback_description = (
-            source_item.normalized_description
-            if source_item is not None and source_item.normalized_description
-            else str(item.get("merchant", "Other")).strip() or "Other"
-        )
-        by_id[item_id] = sanitize_classification(
-            item,
-            fallback_description=fallback_description,
-            used_web_context=bool(source_item.web_context) if source_item is not None else False,
-        )
+        if item_by_id.get(item_id) is None:
+            continue
+        by_id[item_by_id[item_id].cache_key] = sanitize_category_classification(item)
 
     expected_ids = {item.cache_key for item in items}
     if set(by_id) != expected_ids:
@@ -1004,30 +870,151 @@ def call_llm_batch(model: str, items: list[ClassificationItem]) -> dict[str, dic
     return by_id
 
 
-def classify_with_llm(model: str, items: list[ClassificationItem]) -> dict[str, dict]:
+def call_asset_class_llm_batch(
+    model: str,
+    items: list[ClassificationItem],
+    prompt_addendum: str = "",
+    asset_class_prompt_template: str = "",
+) -> dict[str, dict]:
+    response_schema = {
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "asset_class": {"type": "string", "enum": ALLOWED_ASSET_CLASSES},
+                    },
+                    "required": ["id", "asset_class"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["results"],
+        "additionalProperties": False,
+    }
+    prompt = build_asset_class_prompt(
+        items,
+        prompt_addendum=prompt_addendum,
+        asset_class_prompt_template=asset_class_prompt_template,
+    )
+    content = ollama_chat(model=model, prompt=prompt, response_schema=response_schema, timeout_seconds=240)
+    parsed = json.loads(content)
+    if isinstance(parsed, list):
+        results = parsed
+    else:
+        results = parsed.get("results", [])
+    if not isinstance(results, list):
+        raise ValueError("LLM response did not contain a results array.")
+
+    by_id: dict[str, dict] = {}
+    item_by_id = {str(index): item for index, item in enumerate(items, start=1)}
+    for item in results:
+        if not isinstance(item, dict) or "id" not in item:
+            continue
+        item_id = str(item["id"])
+        source_item = item_by_id.get(item_id)
+        if source_item is None:
+            continue
+        by_id[source_item.cache_key] = sanitize_asset_class_classification(item, source_item.sign)
+
+    expected_ids = {item.cache_key for item in items}
+    if set(by_id) != expected_ids:
+        missing = expected_ids - set(by_id)
+        extra = set(by_id) - expected_ids
+        raise ValueError(f"LLM response ids mismatch. missing={sorted(missing)} extra={sorted(extra)}")
+    return by_id
+
+
+def classify_categories_with_llm(
+    model: str,
+    items: list[ClassificationItem],
+    prompt_template: str = "",
+    prompt_addendum: str = "",
+    account_holder_name: str = "",
+    prompt_examples: Optional[list[dict[str, str]]] = None,
+) -> dict[str, dict]:
     if not items:
         return {}
 
     try:
-        return call_llm_batch(model=model, items=items)
+        return call_category_llm_batch(
+            model=model,
+            items=items,
+            prompt_template=prompt_template,
+            prompt_addendum=prompt_addendum,
+            account_holder_name=account_holder_name,
+            prompt_examples=prompt_examples,
+        )
     except (json.JSONDecodeError, urllib.error.URLError, TimeoutError, ValueError) as exc:
         if len(items) == 1:
             item = items[0]
             return {
                 item.cache_key: default_classification(
-                    group="other",
                     category="other",
-                    merchant=item.normalized_description or item.description,
-                    subcategory="manual_review",
-                    confidence=0.2,
-                    needs_review=True,
-                    reason=f"LLM fallback after error: {exc}",
                     source="fallback",
                 )
             }
         middle = max(1, len(items) // 2)
-        left = classify_with_llm(model=model, items=items[:middle])
-        right = classify_with_llm(model=model, items=items[middle:])
+        left = classify_categories_with_llm(
+            model=model,
+            items=items[:middle],
+            prompt_template=prompt_template,
+            prompt_addendum=prompt_addendum,
+            account_holder_name=account_holder_name,
+            prompt_examples=prompt_examples,
+        )
+        right = classify_categories_with_llm(
+            model=model,
+            items=items[middle:],
+            prompt_template=prompt_template,
+            prompt_addendum=prompt_addendum,
+            account_holder_name=account_holder_name,
+            prompt_examples=prompt_examples,
+        )
+        return {**left, **right}
+
+
+def classify_asset_classes_with_llm(
+    model: str,
+    items: list[ClassificationItem],
+    prompt_addendum: str = "",
+    asset_class_prompt_template: str = "",
+) -> dict[str, dict]:
+    if not items:
+        return {}
+
+    try:
+        return call_asset_class_llm_batch(
+            model=model,
+            items=items,
+            prompt_addendum=prompt_addendum,
+            asset_class_prompt_template=asset_class_prompt_template,
+        )
+    except (json.JSONDecodeError, urllib.error.URLError, TimeoutError, ValueError):
+        if len(items) == 1:
+            item = items[0]
+            return {
+                item.cache_key: {
+                    "asset_class": "crypto" if item.sign == "crypto" else "other",
+                    "source": "fallback",
+                }
+            }
+        middle = max(1, len(items) // 2)
+        left = classify_asset_classes_with_llm(
+            model=model,
+            items=items[:middle],
+            prompt_addendum=prompt_addendum,
+            asset_class_prompt_template=asset_class_prompt_template,
+        )
+        right = classify_asset_classes_with_llm(
+            model=model,
+            items=items[middle:],
+            prompt_addendum=prompt_addendum,
+            asset_class_prompt_template=asset_class_prompt_template,
+        )
         return {**left, **right}
 
 
@@ -1041,12 +1028,12 @@ def month_index(month_value: str) -> int:
 
 
 def detect_recurring_patterns(rows: list[dict]) -> dict[str, dict]:
-    grouped: dict[tuple[str, str, str, str], list[dict]] = defaultdict(list)
+    grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for row in rows:
-        group = row["group"]
+        group = derive_group_from_category(row["category"])
         if group not in {"income", "expense", "tax"}:
             continue
-        grouped[(group, row["merchant"].strip().upper(), row["category"], row["subcategory"])].append(row)
+        grouped[(row["category"], row["normalized_description"].strip().upper())].append(row)
 
     recurring_by_row_id: dict[str, dict] = {}
     for key, entries in grouped.items():
@@ -1071,12 +1058,14 @@ def detect_recurring_patterns(rows: list[dict]) -> dict[str, dict]:
         if baseline == 0:
             continue
         stable_ratio = sum(1 for amount in amounts if abs(amount - baseline) / baseline <= 0.30) / len(amounts)
-        if stable_ratio < 0.6 and key[0] != "income":
+        category = key[0]
+        group = derive_group_from_category(category)
+        if stable_ratio < 0.6 and group != "income":
             continue
 
         confidence = min(0.99, 0.48 + 0.07 * len(distinct_months) + 0.18 * consecutive_ratio + 0.16 * stable_ratio)
-        is_fixed_cost = key[0] == "expense" and (key[2] in FIXED_COST_CATEGORIES or confidence >= 0.82)
-        recurrence_key = f"{key[0]}|{key[1]}|{key[2]}|{key[3]}"
+        is_fixed_cost = group == "expense" and (category in FIXED_COST_CATEGORIES or confidence >= 0.82)
+        recurrence_key = f"{group}|{key[1]}|{category}"
         for entry in entries:
             recurring_by_row_id[entry["row_id"]] = {
                 "is_recurring": True,
@@ -1089,7 +1078,7 @@ def detect_recurring_patterns(rows: list[dict]) -> dict[str, dict]:
 
 
 def apply_cashflow_bucket(row: dict) -> str:
-    group = row["group"]
+    group = derive_group_from_category(row["category"])
     category = row["category"]
     if group == "income":
         return "income"
@@ -1110,6 +1099,7 @@ def write_categorized_csv(path: Path, rows: list[dict]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
+            extrasaction="ignore",
             fieldnames=[
                 "row_id",
                 "page",
@@ -1120,10 +1110,7 @@ def write_categorized_csv(path: Path, rows: list[dict]) -> None:
                 "type",
                 "description",
                 "normalized_description",
-                "merchant",
-                "group",
                 "category",
-                "subcategory",
                 "cashflow_bucket",
                 "is_recurring",
                 "recurrence_frequency",
@@ -1135,64 +1122,17 @@ def write_categorized_csv(path: Path, rows: list[dict]) -> None:
                 "payment_out_eur",
                 "balance_eur",
                 "include_in_operating_cashflow",
-                "needs_review",
-                "confidence",
                 "classification_source",
                 "classification_key",
-                "classification_reason",
+                "asset_class",
+                "link_group_id",
+                "link_role",
                 "raw_row",
             ],
         )
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
-
-
-def write_review_csv(path: Path, rows: list[dict]) -> None:
-    review_rows = [row for row in rows if row["needs_review"] == "true"]
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=[
-                "row_id",
-                "date",
-                "type",
-                "description",
-                "merchant",
-                "group",
-                "category",
-                "cashflow_bucket",
-                "is_recurring",
-                "is_fixed_cost",
-                "signed_amount_eur",
-                "classification_source",
-                "classification_key",
-                "classification_reason",
-                "raw_row",
-            ],
-        )
-        writer.writeheader()
-        for row in review_rows:
-            writer.writerow(
-                {
-                    "row_id": row["row_id"],
-                    "date": row["date"],
-                    "type": row["type"],
-                    "description": row["description"],
-                    "merchant": row["merchant"],
-                    "group": row["group"],
-                    "category": row["category"],
-                    "cashflow_bucket": row["cashflow_bucket"],
-                    "is_recurring": row["is_recurring"],
-                    "is_fixed_cost": row["is_fixed_cost"],
-                    "signed_amount_eur": row["signed_amount_eur"],
-                    "classification_source": row["classification_source"],
-                    "classification_key": row["classification_key"],
-                    "classification_reason": row["classification_reason"],
-                    "raw_row": row["raw_row"],
-                }
-            )
-
 
 def build_period_overview(rows: list[dict], period_field: str) -> list[dict]:
     periods: dict[str, dict] = defaultdict(
@@ -1223,7 +1163,7 @@ def build_period_overview(rows: list[dict], period_field: str) -> list[dict]:
         bucket["transaction_count"] += 1
         bucket["net_cashflow_eur"] += amount
 
-        group = row["group"]
+        group = derive_group_from_category(row["category"])
         cashflow_bucket = row.get("cashflow_bucket", "other")
         if group == "income":
             bucket["income_eur"] += amount
@@ -1278,7 +1218,7 @@ def build_period_overview(rows: list[dict], period_field: str) -> list[dict]:
 
 
 def build_category_summary(rows: list[dict], period_field: str) -> list[dict]:
-    buckets: dict[tuple[str, str, str], dict] = defaultdict(
+    buckets: dict[tuple[str, str], dict] = defaultdict(
         lambda: {
             period_field: "",
             "group": "",
@@ -1291,11 +1231,12 @@ def build_category_summary(rows: list[dict], period_field: str) -> list[dict]:
     )
 
     for row in rows:
-        key = (row[period_field], row["group"], row["category"])
+        group = derive_group_from_category(row["category"])
+        key = (row[period_field], row["category"])
         amount = parse_decimal(row["signed_amount_eur"])
         bucket = buckets[key]
         bucket[period_field] = row[period_field]
-        bucket["group"] = row["group"]
+        bucket["group"] = group
         bucket["category"] = row["category"]
         bucket["transaction_count"] += 1
         bucket["net_amount_eur"] += amount
@@ -1352,7 +1293,6 @@ def main() -> None:
     yearly_overview_path = output_dir / f"{stem}_yearly_overview.csv"
     monthly_categories_path = output_dir / f"{stem}_monthly_categories.csv"
     yearly_categories_path = output_dir / f"{stem}_yearly_categories.csv"
-    review_path = output_dir / f"{stem}_needs_review.csv"
     cache_path = output_dir / f"{stem}_category_cache.json"
     rules_path = (
         Path(args.rules_file).expanduser().resolve()
@@ -1367,17 +1307,42 @@ def main() -> None:
     print(f"Loaded {len(transactions)} rows.", file=sys.stderr)
     manual_rules = load_manual_rules(rules_path)
     if manual_rules:
-        print(f"Loaded {len(manual_rules)} manual rules from {rules_path}.", file=sys.stderr)
+        print(
+            f"Loaded {len(manual_rules)} manual rules from {rules_path} for prompt examples.",
+            file=sys.stderr,
+        )
     else:
         print(f"No manual rules loaded from {rules_path}.", file=sys.stderr)
     row_overrides = load_row_overrides(row_overrides_path) if row_overrides_path else {}
+    prompt_template = load_prompt_template(args.prompt_template_file)
+    asset_class_prompt_template = DEFAULT_ASSET_CLASS_PROMPT_TEMPLATE
+    prompt_addendum = load_prompt_addendum(args.prompt_addendum_file)
+    account_holder_name = re.sub(r"\s+", " ", args.user_name).strip()
+    prompt_examples = build_prompt_examples(manual_rules, row_overrides)
+    prompt_fingerprint = build_prompt_fingerprint(
+        prompt_template=prompt_template,
+        asset_class_prompt_template=asset_class_prompt_template,
+        prompt_addendum=prompt_addendum,
+        account_holder_name=account_holder_name,
+        prompt_examples=prompt_examples,
+    )
     if row_overrides_path is not None:
         if row_overrides:
             print(f"Loaded {len(row_overrides)} row overrides from {row_overrides_path}.", file=sys.stderr)
         else:
             print(f"No row overrides loaded from {row_overrides_path}.", file=sys.stderr)
+    if prompt_examples:
+        print(f"Loaded {len(prompt_examples)} prompt examples from manual corrections and rules.", file=sys.stderr)
 
-    existing_cache_entries = load_cache(cache_path, refresh_cache=args.refresh_cache)
+    existing_cache_entries = {
+        key: normalize_cached_classification(value if isinstance(value, dict) else {})
+        for key, value in load_cache(
+            cache_path,
+            refresh_cache=args.refresh_cache,
+            model=args.model,
+            prompt_fingerprint=prompt_fingerprint,
+        ).items()
+    }
     cache_entries = dict(existing_cache_entries)
     items_by_key: dict[str, ClassificationItem] = {}
     classification_by_key: dict[str, dict] = {}
@@ -1385,28 +1350,14 @@ def main() -> None:
 
     for row in transactions:
         cache_key = build_cache_key(row)
-        normalized_description = normalize_description_for_classification(row.description)
         sign = "income" if row.signed_amount > 0 else "expense" if row.signed_amount < 0 else "zero"
 
         if cache_key in classification_by_key:
             continue
 
-        manual_result = match_manual_rule(row, manual_rules)
-        if manual_result is not None:
-            classification_by_key[cache_key] = manual_result
-            resolution_by_key[cache_key] = "manual_rule"
-            continue
-
         if cache_key in existing_cache_entries:
             classification_by_key[cache_key] = existing_cache_entries[cache_key]
             resolution_by_key[cache_key] = "cache"
-            continue
-
-        rule_result = classify_rule_based(row)
-        if rule_result is not None:
-            classification_by_key[cache_key] = rule_result
-            cache_entries[cache_key] = rule_result
-            resolution_by_key[cache_key] = "rule"
             continue
 
         if cache_key not in items_by_key:
@@ -1415,42 +1366,78 @@ def main() -> None:
                 tx_type=row.tx_type,
                 sign=sign,
                 description=row.description,
-                normalized_description=normalized_description,
-                example_amount=format_decimal(row.signed_amount),
+                amount_eur=format_decimal(row.signed_amount),
             )
 
     pending_items = list(items_by_key.values())
-    web_lookup_stats = {"queries": 0, "enriched": 0}
-    if pending_items and not args.disable_web_enrichment:
-        print("Looking up unknown merchants/products on the web before LLM classification...", file=sys.stderr)
-        pending_items, web_lookup_stats = enrich_items_with_web_context(
-            pending_items,
-            timeout_seconds=max(1, args.web_timeout_seconds),
-            max_results=max(1, args.web_results),
-        )
-        print(
-            f"Web enrichment added context to {web_lookup_stats['enriched']} of {len(pending_items)} uncached descriptions across {web_lookup_stats['queries']} queries.",
-            file=sys.stderr,
-        )
     if pending_items:
         print(
-            f"Classifying {len(pending_items)} unique descriptions with {args.model} in batches of {args.batch_size}...",
+            f"Classifying categories for {len(pending_items)} unique descriptions with {args.model} in batches of {args.batch_size}...",
             file=sys.stderr,
         )
         for batch_index, batch in enumerate(chunked(pending_items, args.batch_size), start=1):
             print(
-                f"  Batch {batch_index}/{(len(pending_items) + args.batch_size - 1) // args.batch_size}: {len(batch)} items",
+                f"  Category batch {batch_index}/{(len(pending_items) + args.batch_size - 1) // args.batch_size}: {len(batch)} items",
                 file=sys.stderr,
             )
-            batch_results = classify_with_llm(model=args.model, items=batch)
+            batch_results = classify_categories_with_llm(
+                model=args.model,
+                items=batch,
+                prompt_template=prompt_template,
+                prompt_addendum=prompt_addendum,
+                account_holder_name=account_holder_name,
+                prompt_examples=prompt_examples,
+            )
             for cache_key, classification in batch_results.items():
-                classification_by_key[cache_key] = classification
-                cache_entries[cache_key] = classification
-                resolution_by_key[cache_key] = "llm" if classification.get("source") in {"llm", "llm_web"} else "fallback"
+                merged_classification = dict(classification)
+                if merged_classification["category"] == "crypto":
+                    merged_classification["asset_class"] = "crypto"
+                else:
+                    merged_classification["asset_class"] = "other"
+                classification_by_key[cache_key] = merged_classification
+                cache_entries[cache_key] = merged_classification
+                resolution_by_key[cache_key] = "llm" if classification.get("source") == "llm" else "fallback"
+
+        investment_asset_items = [
+            ClassificationItem(
+                cache_key=item.cache_key,
+                tx_type=item.tx_type,
+                sign=classification_by_key[item.cache_key]["category"],
+                description=item.description,
+                amount_eur=item.amount_eur,
+            )
+            for item in pending_items
+            if classification_by_key.get(item.cache_key, {}).get("category") in {"investing", "crypto"}
+        ]
+        if investment_asset_items:
+            print(
+                f"Classifying asset classes for {len(investment_asset_items)} investment descriptions with {args.model} in batches of {args.batch_size}...",
+                file=sys.stderr,
+            )
+            for batch_index, batch in enumerate(chunked(investment_asset_items, args.batch_size), start=1):
+                print(
+                    f"  Asset class batch {batch_index}/{(len(investment_asset_items) + args.batch_size - 1) // args.batch_size}: {len(batch)} items",
+                    file=sys.stderr,
+                )
+                batch_results = classify_asset_classes_with_llm(
+                    model=args.model,
+                    items=batch,
+                    prompt_addendum=prompt_addendum,
+                    asset_class_prompt_template=asset_class_prompt_template,
+                )
+                for cache_key, asset_classification in batch_results.items():
+                    current = dict(classification_by_key.get(cache_key) or {})
+                    if not current:
+                        continue
+                    current["asset_class"] = asset_classification.get("asset_class", current.get("asset_class", "other"))
+                    classification_by_key[cache_key] = current
+                    cache_entries[cache_key] = current
+        else:
+            print("No investment descriptions required LLM asset classification.", file=sys.stderr)
     else:
         print("No uncached descriptions required LLM classification.", file=sys.stderr)
 
-    save_cache(cache_path, model=args.model, entries=cache_entries)
+    save_cache(cache_path, model=args.model, prompt_fingerprint=prompt_fingerprint, entries=cache_entries)
 
     resolution_counts = Counter()
     row_override_hits = 0
@@ -1461,13 +1448,7 @@ def main() -> None:
         resolution = resolution_by_key.get(cache_key)
         if classification is None:
             classification = default_classification(
-                group="other",
                 category="other",
-                merchant=row.description,
-                subcategory="missing_classification",
-                confidence=0.1,
-                needs_review=True,
-                reason="No classification available.",
                 source="fallback",
             )
             resolution = "fallback"
@@ -1476,12 +1457,17 @@ def main() -> None:
         resolution_counts[resolution or "fallback"] += 1
         effective_classification = dict(classification)
         override = row_overrides.get(row.row_id)
+        link_group_id = ""
+        link_role = ""
         if override is not None:
             effective_classification = apply_row_override(effective_classification, override)
+            link_group_id = override.link_group_id or ""
+            link_role = override.link_role or ""
             row_override_hits += 1
 
         month = row.date[:7]
         year = row.date[:4]
+        effective_group = derive_group_from_category(effective_classification["category"])
         categorized_rows.append(
             {
                 "row_id": row.row_id,
@@ -1493,10 +1479,8 @@ def main() -> None:
                 "type": row.tx_type,
                 "description": row.description,
                 "normalized_description": normalize_description_for_classification(row.description),
-                "merchant": effective_classification["merchant"],
-                "group": effective_classification["group"],
+                "group": effective_group,
                 "category": effective_classification["category"],
-                "subcategory": effective_classification["subcategory"],
                 "cashflow_bucket": "other",
                 "is_recurring": "false",
                 "recurrence_frequency": "none",
@@ -1508,13 +1492,13 @@ def main() -> None:
                 "payment_out_eur": row.payment_out,
                 "balance_eur": row.balance,
                 "include_in_operating_cashflow": str(
-                    effective_classification["group"] in {"income", "expense", "tax", "other"}
+                    effective_group in {"income", "expense", "tax", "other"}
                 ).lower(),
-                "needs_review": str(bool(effective_classification["needs_review"])).lower(),
-                "confidence": f"{effective_classification['confidence']:.2f}",
                 "classification_source": effective_classification["source"],
                 "classification_key": cache_key,
-                "classification_reason": effective_classification["reason"],
+                "asset_class": effective_classification.get("asset_class", "other"),
+                "link_group_id": link_group_id,
+                "link_role": link_role,
                 "raw_row": row.raw_row,
             }
         )
@@ -1536,7 +1520,6 @@ def main() -> None:
     yearly_categories = build_category_summary(categorized_rows, "year")
 
     write_categorized_csv(categorized_path, categorized_rows)
-    write_review_csv(review_path, categorized_rows)
     write_summary_csv(
         monthly_overview_path,
         monthly_overview,
@@ -1590,11 +1573,9 @@ def main() -> None:
         ["year", "group", "category", "transaction_count", "inflow_eur", "outflow_eur", "net_amount_eur"],
     )
 
-    review_count = sum(row["needs_review"] == "true" for row in categorized_rows)
     completed_at = timestamp_now()
     output_files = {
         "categorized_csv": str(categorized_path),
-        "review_csv": str(review_path),
         "monthly_overview_csv": str(monthly_overview_path),
         "yearly_overview_csv": str(yearly_overview_path),
         "monthly_categories_csv": str(monthly_categories_path),
@@ -1608,15 +1589,10 @@ def main() -> None:
             {
                 "model": args.model,
                 "transaction_row_count": len(transactions),
-                "review_count": review_count,
                 "cache_entry_count": len(cache_entries),
                 "cache_hits": resolution_counts["cache"],
-                "cache_misses": resolution_counts["rule"] + resolution_counts["llm"] + resolution_counts["fallback"],
-                "manual_rule_hits": resolution_counts["manual_rule"],
-                "built_in_rule_hits": resolution_counts["rule"],
+                "cache_misses": resolution_counts["llm"] + resolution_counts["fallback"],
                 "llm_classifications": resolution_counts["llm"],
-                "web_enriched_classifications": web_lookup_stats["enriched"],
-                "web_lookup_queries": web_lookup_stats["queries"],
                 "row_override_hits": row_override_hits,
                 "output_files": output_files,
                 "timestamps": {
@@ -1627,7 +1603,6 @@ def main() -> None:
         )
 
     print(f"Wrote categorized transactions to {categorized_path}")
-    print(f"Wrote review rows to {review_path}")
     print(f"Wrote monthly overview to {monthly_overview_path}")
     print(f"Wrote yearly overview to {yearly_overview_path}")
     print(f"Wrote monthly categories to {monthly_categories_path}")
@@ -1635,7 +1610,6 @@ def main() -> None:
     print(f"Wrote classification cache to {cache_path}")
     if summary_json_path is not None:
         print(f"Wrote pipeline summary to {summary_json_path}")
-    print(f"Rows marked for review: {review_count}/{len(categorized_rows)}")
 
 
 if __name__ == "__main__":
