@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,9 @@ from typing import Iterable, Optional
 
 MAIN_HEADER = "DATUM TYP BESCHREIBUNG ZAHLUNGSEINGANG ZAHLUNGSAUSGANG SALDO"
 FUND_HEADER = "DATUM ZAHLUNGSART GELDMARKTFONDS STÜCK KURS PRO STÜCK BETRAG"
+TRANSACTION_HEADER_FIELDS = {"DATUM", "TYP", "BESCHREIBUNG", "SALDO"}
+FUND_HEADER_FIELDS = {"DATUM", "ZAHLUNGSART", "GELDMARKTFONDS", "STÜCK", "BETRAG"}
+ROW_TOP_PADDING = 5.0
 KNOWN_TRANSACTION_TYPES = [
     "SEPA-Lastschrift",
     "Kartentransaktion",
@@ -30,6 +34,9 @@ KNOWN_TRANSACTION_TYPES = [
     "Steuern",
 ]
 EURO_RE = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d{2} €")
+ISIN_RE = re.compile(r"\b[A-Z0-9]{12}\b")
+DECIMAL_NUMBER_RE = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d{2}")
+STATEMENT_DATE_RE = re.compile(r"^\d{2} [A-Za-zÄÖÜäöüß]+\.? \d{4}$")
 FUND_RE = re.compile(
     r"^(?P<date>\d{2} [A-Za-zÄÖÜäöüß]+\.? \d{4}) "
     r"(?P<payment_type>Kauf|Verkauf) "
@@ -275,10 +282,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def ensure_environment() -> None:
-    if sys.platform != "darwin":
-        raise SystemExit("This script requires macOS because it uses PDFKit via Swift.")
-    if not Path("/usr/bin/swift").exists():
-        raise SystemExit("Missing /usr/bin/swift.")
+    if sys.platform == "darwin" and Path("/usr/bin/swift").exists():
+        return
+    if resolve_node_executable():
+        return
+    if sys.platform == "darwin":
+        raise SystemExit("Missing /usr/bin/swift and no Node.js runtime found for the pdf.js fallback.")
+    raise SystemExit("Missing Node.js. Install Node.js to use the cross-platform pdf.js PDF parser.")
 
 
 def parse_euro(text: str) -> Decimal:
@@ -306,6 +316,10 @@ def join_texts(parts: Iterable[str]) -> str:
     return re.sub(r"\s+", " ", joined).strip()
 
 
+def normalize_fragment_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def parse_date(date_text: str) -> str:
     tokens = date_text.split()
     if len(tokens) < 3:
@@ -318,6 +332,85 @@ def parse_date(date_text: str) -> str:
     return f"{year}-{month}-{int(day):02d}"
 
 
+def looks_like_statement_date(text: str) -> bool:
+    return bool(STATEMENT_DATE_RE.fullmatch(text.strip()))
+
+
+def extract_fund_row_fields(
+    band: list[Fragment],
+) -> Optional[tuple[str, str, str, str, str, str, str, str]]:
+    lead_text = join_texts(
+        fragment.text
+        for fragment in sorted(
+            [fragment for fragment in band if fragment.x < 197],
+            key=lambda fragment: (-fragment.y, fragment.x),
+        )
+    )
+    lead_tokens = lead_text.split()
+    date_original = join_texts(lead_tokens[:3])
+    if not looks_like_statement_date(date_original):
+        return None
+
+    payment_type = lead_tokens[3] if len(lead_tokens) > 3 else ""
+    fund_parts: list[str] = []
+    lead_remainder = join_texts(lead_tokens[4:])
+    if lead_remainder:
+        fund_parts.append(lead_remainder)
+
+    isin = ""
+    units = ""
+    price = ""
+    amount = ""
+
+    def fill_numeric_fields(text: str) -> None:
+        nonlocal units, price, amount
+        normalized = normalize_fragment_text(text)
+        if not normalized:
+            return
+
+        euro_matches = EURO_RE.findall(normalized)
+        if euro_matches:
+            if not price:
+                price = euro_matches[0]
+            amount = euro_matches[-1]
+            normalized = normalized[: normalized.find(euro_matches[0])].strip()
+
+        if normalized and not units:
+            match = DECIMAL_NUMBER_RE.search(normalized)
+            if match:
+                units = match.group(0)
+
+    for fragment in sorted(
+        [fragment for fragment in band if fragment.x >= 197],
+        key=lambda fragment: (fragment.x, -fragment.y),
+    ):
+        text = normalize_fragment_text(fragment.text)
+        if not text:
+            continue
+
+        isin_match = ISIN_RE.search(text)
+        if isin_match:
+            before = text[: isin_match.start()].strip()
+            after = text[isin_match.end() :].strip()
+            if before:
+                fund_parts.append(before)
+            if not isin:
+                isin = isin_match.group(0)
+            if after:
+                fill_numeric_fields(after)
+            continue
+
+        if fragment.x < 356 and not EURO_RE.search(text) and not DECIMAL_NUMBER_RE.fullmatch(text):
+            fund_parts.append(text)
+            continue
+
+        fill_numeric_fields(text)
+
+    fund = join_texts(fund_parts)
+    raw_row = join_texts([date_original, payment_type, fund, isin, units, price, amount])
+    return date_original, payment_type, fund, isin, units, price, amount, raw_row
+
+
 def split_type_and_description(body_without_amounts: str) -> tuple[str, str]:
     for known_type in KNOWN_TRANSACTION_TYPES:
         if body_without_amounts == known_type:
@@ -327,6 +420,21 @@ def split_type_and_description(body_without_amounts: str) -> tuple[str, str]:
             return known_type, body_without_amounts[len(prefix) :].strip()
     first, _, rest = body_without_amounts.partition(" ")
     return first, rest.strip()
+
+
+def resolve_node_executable() -> Optional[str]:
+    candidate = os.environ.get("TRACK_REPUBLIC_NODE", "").strip()
+    if candidate:
+        expanded = Path(candidate).expanduser()
+        if expanded.exists():
+            return str(expanded)
+        if shutil.which(candidate):
+            return candidate
+    return shutil.which("node")
+
+
+def resolve_pdfjs_script_path() -> Path:
+    return Path(__file__).resolve().with_name("extract_pdf_text.mjs")
 
 
 def run_swift_extraction(pdf_path: Path) -> list[Fragment]:
@@ -344,11 +452,75 @@ def run_swift_extraction(pdf_path: Path) -> list[Fragment]:
     return [Fragment(**item) for item in decoded]
 
 
+def run_node_extraction(pdf_path: Path) -> list[Fragment]:
+    node_executable = resolve_node_executable()
+    if not node_executable:
+        raise SystemExit("Missing Node.js. Install Node.js to use the cross-platform pdf.js PDF parser.")
+
+    raw = subprocess.check_output(
+        [
+            node_executable,
+            str(resolve_pdfjs_script_path()),
+            "--format",
+            "fragments",
+            str(pdf_path),
+        ],
+        text=True,
+    )
+    decoded = json.loads(raw)
+    return [Fragment(**item) for item in decoded]
+
+
+def run_pdf_extraction(pdf_path: Path) -> list[Fragment]:
+    if sys.platform == "darwin" and Path("/usr/bin/swift").exists():
+        try:
+            return run_swift_extraction(pdf_path)
+        except (subprocess.CalledProcessError, FileNotFoundError, json.JSONDecodeError) as error:
+            print(
+                f"Swift/PDFKit extraction failed ({error}); falling back to pdf.js.",
+                file=sys.stderr,
+            )
+    return run_node_extraction(pdf_path)
+
+
 def group_pages(fragments: list[Fragment]) -> dict[int, list[Fragment]]:
     pages: dict[int, list[Fragment]] = defaultdict(list)
     for fragment in fragments:
         pages[fragment.page].append(fragment)
     return pages
+
+
+def cluster_y_bands(fragments: list[Fragment], tolerance: float = 4.0) -> list[list[Fragment]]:
+    bands: list[list[Fragment]] = []
+    for fragment in sorted(fragments, key=lambda item: -item.y):
+        if not bands or abs(bands[-1][0].y - fragment.y) > tolerance:
+            bands.append([fragment])
+        else:
+            bands[-1].append(fragment)
+    return bands
+
+
+def find_header_y(
+    page_fragments: list[Fragment],
+    *,
+    exact_text: str,
+    required_fields: set[str],
+) -> Optional[float]:
+    exact_headers = [
+        fragment
+        for fragment in page_fragments
+        if normalize_fragment_text(fragment.text) == exact_text
+    ]
+    if exact_headers:
+        return max(fragment.y for fragment in exact_headers)
+
+    for band in cluster_y_bands(page_fragments):
+        texts = {normalize_fragment_text(fragment.text) for fragment in band}
+        if required_fields.issubset(texts):
+            xs = [fragment.x for fragment in band]
+            if xs and min(xs) < 120 and max(xs) > 350:
+                return max(fragment.y for fragment in band)
+    return None
 
 
 def cluster_date_fragments(fragments: list[Fragment]) -> list[list[Fragment]]:
@@ -367,8 +539,25 @@ def cluster_date_fragments(fragments: list[Fragment]) -> list[list[Fragment]]:
 
 def get_starting_balance(page_one_fragments: list[Fragment]) -> Decimal:
     for fragment in page_one_fragments:
-        if fragment.text.startswith("Cashkonto "):
+        normalized = normalize_fragment_text(fragment.text)
+        if normalized.startswith("Cashkonto "):
             amounts = EURO_RE.findall(fragment.text)
+            if amounts:
+                return parse_euro(amounts[0])
+
+    for fragment in sorted(page_one_fragments, key=lambda item: (-item.y, item.x)):
+        if normalize_fragment_text(fragment.text) != "Cashkonto":
+            continue
+        same_band = sorted(
+            [
+                candidate
+                for candidate in page_one_fragments
+                if abs(candidate.y - fragment.y) <= 4 and candidate.x > fragment.x
+            ],
+            key=lambda candidate: candidate.x,
+        )
+        for candidate in same_band:
+            amounts = EURO_RE.findall(candidate.text)
             if amounts:
                 return parse_euro(amounts[0])
     return Decimal("0.00")
@@ -378,11 +567,13 @@ def build_transaction_rows(
     page_number: int,
     page_fragments: list[Fragment],
 ) -> list[dict[str, object]]:
-    headers = [fragment for fragment in page_fragments if fragment.text == MAIN_HEADER]
-    if not headers:
+    header_y = find_header_y(
+        page_fragments,
+        exact_text=MAIN_HEADER,
+        required_fields=TRANSACTION_HEADER_FIELDS,
+    )
+    if header_y is None:
         return []
-
-    header_y = max(fragment.y for fragment in headers)
     content = [fragment for fragment in page_fragments if 95 < fragment.y < header_y - 1]
     row_clusters = cluster_date_fragments(content)
     row_tops = [cluster[0].y for cluster in row_clusters]
@@ -390,8 +581,12 @@ def build_transaction_rows(
     rows: list[dict[str, object]] = []
     for index, cluster in enumerate(row_clusters):
         row_top = cluster[0].y
-        row_bottom = row_tops[index + 1] if index + 1 < len(row_tops) else 95
-        band = [fragment for fragment in content if row_bottom < fragment.y <= row_top + 0.01]
+        row_bottom = (
+            (row_top + row_tops[index + 1]) / 2
+            if index + 1 < len(row_tops)
+            else 95
+        )
+        band = [fragment for fragment in content if row_bottom < fragment.y <= row_top + ROW_TOP_PADDING]
         cluster_keys = {(fragment.x, fragment.y, fragment.text) for fragment in cluster}
 
         date_parts: list[tuple[float, str]] = []
@@ -421,6 +616,8 @@ def build_transaction_rows(
         date_original = join_texts(
             part for _, part in sorted(date_parts, key=lambda item: -item[0])
         )
+        if not looks_like_statement_date(date_original):
+            continue
         raw_row = join_texts(
             [
                 join_texts(part for _, part in sorted(lead_parts, key=lambda item: -item[0])),
@@ -464,11 +661,13 @@ def build_transaction_rows(
 
 
 def build_fund_rows(page_number: int, page_fragments: list[Fragment]) -> list[FundRow]:
-    headers = [fragment for fragment in page_fragments if fragment.text == FUND_HEADER]
-    if not headers:
+    header_y = find_header_y(
+        page_fragments,
+        exact_text=FUND_HEADER,
+        required_fields=FUND_HEADER_FIELDS,
+    )
+    if header_y is None:
         return []
-
-    header_y = max(fragment.y for fragment in headers)
     content = [fragment for fragment in page_fragments if 95 < fragment.y < header_y - 1]
     row_clusters = cluster_date_fragments(content)
     row_tops = [cluster[0].y for cluster in row_clusters]
@@ -476,29 +675,22 @@ def build_fund_rows(page_number: int, page_fragments: list[Fragment]) -> list[Fu
     rows: list[FundRow] = []
     for index, cluster in enumerate(row_clusters):
         row_top = cluster[0].y
-        row_bottom = row_tops[index + 1] if index + 1 < len(row_tops) else 95
-        band = [fragment for fragment in content if row_bottom < fragment.y <= row_top + 0.01]
-        left_text = join_texts(
-            fragment.text
-            for fragment in sorted(
-                [fragment for fragment in band if fragment.x < 197],
-                key=lambda fragment: (-fragment.y, fragment.x),
-            )
+        row_bottom = (
+            (row_top + row_tops[index + 1]) / 2
+            if index + 1 < len(row_tops)
+            else 95
         )
-        right_text = join_texts(
-            fragment.text
-            for fragment in sorted(
-                [fragment for fragment in band if fragment.x >= 197],
-                key=lambda fragment: (-fragment.y, fragment.x),
-            )
-        )
-        raw_row = join_texts([left_text, right_text])
+        band = [fragment for fragment in content if row_bottom < fragment.y <= row_top + ROW_TOP_PADDING]
+        extracted = extract_fund_row_fields(band)
+        if not extracted:
+            continue
+        date_original, payment_type, fund, isin, units, price, amount, raw_row = extracted
         match = FUND_RE.match(raw_row)
         if not match:
             rows.append(
                 FundRow(
                     page=page_number,
-                    date_original="",
+                    date_original=date_original,
                     date="",
                     payment_type="",
                     fund="",
@@ -514,14 +706,14 @@ def build_fund_rows(page_number: int, page_fragments: list[Fragment]) -> list[Fu
         rows.append(
             FundRow(
                 page=page_number,
-                date_original=match.group("date"),
-                date=parse_date(match.group("date")),
-                payment_type=match.group("payment_type"),
-                fund=match.group("fund"),
-                isin=match.group("isin"),
-                units=format_decimal(parse_euro(f"{match.group('units')} €")),
-                price_per_unit=format_decimal(parse_euro(match.group("price"))),
-                amount=format_decimal(parse_euro(match.group("amount"))),
+                date_original=date_original,
+                date=parse_date(date_original),
+                payment_type=payment_type,
+                fund=fund,
+                isin=isin,
+                units=format_decimal(parse_euro(f"{units} €")),
+                price_per_unit=format_decimal(parse_euro(price)),
+                amount=format_decimal(parse_euro(amount)),
                 raw_row=raw_row,
             )
         )
@@ -727,8 +919,8 @@ def write_combined_csv(
             )
 
 def main() -> None:
-    ensure_environment()
     args = parse_args()
+    ensure_environment()
 
     pdf_path = Path(args.pdf).expanduser().resolve()
     if not pdf_path.exists():
@@ -738,7 +930,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix = args.prefix or english_output_name(pdf_path.stem)
 
-    fragments = run_swift_extraction(pdf_path)
+    fragments = run_pdf_extraction(pdf_path)
     pages = group_pages(fragments)
     starting_balance = get_starting_balance(pages.get(1, []))
 
