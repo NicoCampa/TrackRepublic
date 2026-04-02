@@ -729,7 +729,7 @@ export function CategoryEditor({ row }: { row: Record<string, unknown> }) {
 
               <section className="transactions-widget-section category-editor-selector">
                 <div className="category-editor-selector-head">
-                  <strong>Choose category</strong>
+                  <strong>Categories</strong>
                   <span>{normalizedSearch ? `${visibleOptionCount} matches` : `${visibleOptionCount} available`}</span>
                 </div>
                 <div className="field category-editor-search-field">
@@ -766,17 +766,13 @@ export function CategoryEditor({ row }: { row: Record<string, unknown> }) {
                                 onClick={() => setSelectedCategory(option.value)}
                                 disabled={isSaving}
                                 aria-pressed={isSelected}
+                                aria-label={`${option.label}${isCurrent ? ", current" : isSelected ? ", selected" : ""}`}
                               >
-                                <span className="category-editor-sheet-option-copy">
-                                  <CategoryBadge
-                                    category={option.value}
-                                    label={option.label}
-                                    theme={resolveCategoryTheme(option.value)}
-                                  />
-                                </span>
-                                <span className="category-editor-sheet-option-meta">
-                                  {isSaving && isSelected ? "Saving..." : isCurrent ? "Current" : isSelected ? "Selected" : "Choose"}
-                                </span>
+                                <CategoryBadge
+                                  category={option.value}
+                                  label={option.label}
+                                  theme={resolveCategoryTheme(option.value)}
+                                />
                               </button>
                             );
                           })}
