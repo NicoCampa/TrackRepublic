@@ -959,8 +959,9 @@ export function PositionHoldingEditor({ row }: { row: Record<string, unknown> })
       const width = Math.max(320, Math.ceil(rect.width) + 160);
       const spaceBelow = viewportHeight - rect.bottom - gap - margin;
       const spaceAbove = rect.top - gap - margin;
-      const placement = spaceBelow >= 240 || spaceBelow >= spaceAbove ? "bottom" : "top";
-      const maxHeight = Math.max(220, Math.min(preferredHeight, placement === "bottom" ? spaceBelow : spaceAbove));
+      const placement = spaceBelow >= 240 ? "bottom" : spaceAbove > spaceBelow ? "top" : "bottom";
+      const availableHeight = placement === "bottom" ? spaceBelow : spaceAbove;
+      const maxHeight = Math.max(0, Math.min(preferredHeight, availableHeight));
       const left = Math.max(margin, Math.min(rect.left, viewportWidth - width - margin)) + window.scrollX;
       const top = (placement === "bottom" ? rect.bottom + gap : rect.top - gap) + window.scrollY;
 

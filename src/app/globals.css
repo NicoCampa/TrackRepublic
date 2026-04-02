@@ -5388,6 +5388,10 @@ select {
   box-shadow: 0 18px 28px -24px rgba(0, 0, 0, 0.82);
 }
 
+.position-holding-popover[data-placement="top"] {
+  transform: translateY(calc(-100% - 2px));
+}
+
 .position-holding-body {
   min-height: 0;
   overflow: auto;

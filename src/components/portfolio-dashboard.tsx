@@ -30,14 +30,9 @@ import {
 import type {
   HistoricalPriceSeries,
   PortfolioHistoryPoint,
-  PortfolioReturnPoint,
   PositionPerformanceRecord,
 } from "@/lib/investment-performance";
-import {
-  buildInvestmentAnalytics,
-  buildModifiedDietzReturnSummary,
-  historicalPriceOnOrBefore,
-} from "@/lib/investment-performance";
+import { buildInvestmentAnalytics, historicalPriceOnOrBefore } from "@/lib/investment-performance";
 import { extractInvestmentTrades, resolveInstrument } from "@/lib/investment-positions";
 import type { DetailTrendView, DetailView, TableColumn, TableSortState } from "./dashboard-ui";
 import {
@@ -153,39 +148,51 @@ function formatPercent(value: number) {
   return `${value.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
 }
 
-function laterDate(left: string, right: string) {
-  return left > right ? left : right;
+function buildPortfolioRangeIncreaseSummary(rows: PortfolioTrendRow[]) {
+  const orderedRows = rows.slice().sort((left, right) => left.date.localeCompare(right.date));
+  const startPoint = orderedRows[0] ?? null;
+  const endPoint = orderedRows.at(-1) ?? null;
+  if (!startPoint || !endPoint) {
+    return {
+      increasePct: null,
+      increaseEur: null,
+      startValueEur: null,
+      endValueEur: null,
+    };
+  }
+
+  const increaseEur = endPoint.totalValueEur - startPoint.totalValueEur;
+  return {
+    increasePct:
+      Math.abs(startPoint.totalValueEur) > 0.0000001
+        ? (increaseEur / startPoint.totalValueEur) * 100
+        : Math.abs(increaseEur) <= 0.0000001
+          ? 0
+          : null,
+    increaseEur,
+    startValueEur: startPoint.totalValueEur,
+    endValueEur: endPoint.totalValueEur,
+  };
 }
 
-function earlierDate(left: string, right: string) {
-  return left < right ? left : right;
-}
+function buildPortfolioIncreaseRows(rows: PortfolioTrendRow[]) {
+  const orderedRows = rows.slice().sort((left, right) => left.date.localeCompare(right.date));
+  let previousRow: PortfolioTrendRow | null = null;
 
-function startOfPortfolioPeriod(periodKey: string, granularity: PortfolioTrendGranularity) {
-  return granularity === "year" ? `${periodKey}-01-01` : `${periodKey}-01`;
-}
+  return orderedRows.map((row) => {
+    const increasePct =
+      previousRow && Math.abs(previousRow.totalValueEur) > 0.0000001
+        ? ((row.totalValueEur - previousRow.totalValueEur) / previousRow.totalValueEur) * 100
+        : previousRow
+          ? 0
+          : null;
+    previousRow = row;
 
-function buildPortfolioPeriodReturnMap(
-  returnSeries: PortfolioReturnPoint[],
-  rows: PortfolioTrendRow[],
-  granularity: PortfolioTrendGranularity,
-  filters: FilterState,
-) {
-  return new Map(
-    rows.map((row) => {
-      const startDate = laterDate(startOfPortfolioPeriod(row.periodKey, granularity), filters.startDate);
-      const endDate = earlierDate(row.date, filters.endDate);
-      return [row.periodKey, buildModifiedDietzReturnSummary(returnSeries, startDate, endDate).returnPct] as const;
-    }),
-  );
-}
-
-function buildPortfolioRangeReturnSummary(
-  returnSeries: PortfolioReturnPoint[],
-  startDate: string,
-  endDate: string,
-) {
-  return buildModifiedDietzReturnSummary(returnSeries, startDate, endDate, { allowInitialZeroStart: true });
+    return {
+      ...row,
+      periodReturnPct: increasePct,
+    };
+  });
 }
 
 function comparePortfolioValues(left: unknown, right: unknown) {
@@ -526,30 +533,8 @@ export function PortfolioDashboard({ data }: { data: AccountsData }) {
   );
 
   const { monthlyRows, yearlyRows } = useMemo(() => buildPortfolioHistoryRows(analytics.history, filters), [analytics.history, filters]);
-  const monthlyReturnMap = useMemo(
-    () => buildPortfolioPeriodReturnMap(analytics.returnSeries, monthlyRows, "month", filters),
-    [analytics.returnSeries, filters, monthlyRows],
-  );
-  const yearlyReturnMap = useMemo(
-    () => buildPortfolioPeriodReturnMap(analytics.returnSeries, yearlyRows, "year", filters),
-    [analytics.returnSeries, filters, yearlyRows],
-  );
-  const monthlyTrendRows = useMemo(
-    () =>
-      monthlyRows.map((row) => ({
-        ...row,
-        periodReturnPct: monthlyReturnMap.get(row.periodKey) ?? null,
-      })),
-    [monthlyReturnMap, monthlyRows],
-  );
-  const yearlyTrendRows = useMemo(
-    () =>
-      yearlyRows.map((row) => ({
-        ...row,
-        periodReturnPct: yearlyReturnMap.get(row.periodKey) ?? null,
-      })),
-    [yearlyReturnMap, yearlyRows],
-  );
+  const monthlyTrendRows = useMemo(() => buildPortfolioIncreaseRows(monthlyRows), [monthlyRows]);
+  const yearlyTrendRows = useMemo(() => buildPortfolioIncreaseRows(yearlyRows), [yearlyRows]);
   const trendRows = trendGranularity === "year" ? yearlyTrendRows : monthlyTrendRows;
   const trendPeriodLookup = new Map(trendRows.map((row) => [row.displayLabel, row]));
   const selectedTrendRow = trendRows.find((row) => row.periodKey === selectedTrendPeriodKey) ?? null;
@@ -684,8 +669,8 @@ export function PortfolioDashboard({ data }: { data: AccountsData }) {
         ? "Last 12 months"
         : formatDateRange(filters.startDate, filters.endDate);
   const periodReturnSummary = useMemo(
-    () => buildPortfolioRangeReturnSummary(analytics.returnSeries, filters.startDate, filters.endDate),
-    [analytics.returnSeries, filters.endDate, filters.startDate],
+    () => buildPortfolioRangeIncreaseSummary(trendRows),
+    [trendRows],
   );
   const holdingsAsOfDate = selectedTrendRow?.date ?? analytics.snapshot.positionsAsOf;
   const holdingCount = holdingsRows.filter((row) => row.kind === "position").length;
@@ -702,22 +687,24 @@ export function PortfolioDashboard({ data }: { data: AccountsData }) {
   );
 
   const kpiItems = [
-    { label: "Total value", value: formatEuro(totalValueEur), note: `As of ${formatAsOfDate(filters.endDate)}`, tone: "positive" as const },
+    { label: "Net worth", value: formatEuro(totalValueEur), note: `As of ${formatAsOfDate(filters.endDate)}`, tone: "positive" as const },
     { label: "Portfolio value", value: formatEuro(analytics.portfolioValueEur), note: `As of ${formatAsOfDate(analytics.snapshot.positionsAsOf)}`, tone: "positive" as const },
     { label: "Cost basis", value: formatEuro(analytics.costBasisEur), note: activeWindowLabel, tone: "neutral" as const },
     {
-      label: "Return",
-      value: periodReturnSummary.returnPct === null ? "—" : formatPercent(periodReturnSummary.returnPct),
+      label: "Increase",
+      value: periodReturnSummary.increaseEur === null ? "—" : formatEuro(periodReturnSummary.increaseEur, { signed: true }),
       note:
-        periodReturnSummary.returnPct === null
-          ? `${activeWindowLabel} · not enough history`
-          : periodReturnSummary.returnEur === null
+        periodReturnSummary.increaseEur === null
+          ? `${activeWindowLabel} · no value history`
+          : periodReturnSummary.startValueEur === null
             ? activeWindowLabel
-            : `${activeWindowLabel} · ${formatEuro(periodReturnSummary.returnEur, { signed: true })}`,
+            : periodReturnSummary.increasePct === null
+              ? `${activeWindowLabel} · vs ${formatEuro(periodReturnSummary.startValueEur)} start`
+              : `${activeWindowLabel} · ${formatPercent(periodReturnSummary.increasePct)} vs ${formatEuro(periodReturnSummary.startValueEur)} start`,
       tone:
-        periodReturnSummary.returnPct === null
+        periodReturnSummary.increaseEur === null
           ? ("neutral" as const)
-          : periodReturnSummary.returnPct < 0
+          : periodReturnSummary.increaseEur < 0
             ? ("negative" as const)
             : ("accent" as const),
     },
@@ -1186,7 +1173,7 @@ export function PortfolioDashboard({ data }: { data: AccountsData }) {
                       { key: "costBasisEur", label: "Cost basis", align: "right", cellClassName: "cell-nowrap", render: (value) => <span>{formatEuro(Number(value))}</span> },
                       {
                         key: "periodReturnPct",
-                        label: "Return %",
+                        label: "Increase %",
                         align: "right",
                         cellClassName: "cell-nowrap",
                         render: (value) => (
