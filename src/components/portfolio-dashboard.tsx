@@ -320,6 +320,7 @@ function buildHoldingRows(
   cashBalanceEur: number,
   historicalSeries?: HistoricalPriceSeries,
   valuationDate?: string,
+  effectiveDate?: string,
 ) {
   const valuedRows: HoldingRow[] = positions
     .map((row) => {
@@ -343,7 +344,7 @@ function buildHoldingRows(
         assetClass: row.assetClass.toUpperCase().replaceAll("_", " "),
         units: row.units,
         unitsKnown: row.unitsKnown,
-        effectiveDate: valuationDate ?? row.valuationAsOf.slice(0, 10) ?? row.asOf.slice(0, 10),
+        effectiveDate: effectiveDate ?? valuationDate ?? row.asOf.slice(0, 10) ?? row.valuationAsOf.slice(0, 10),
         priceEur: historicalPrice && row.valuationSource === "live_quote" ? historicalPrice : row.priceEur,
         priceScale: row.priceScale,
         marketValueEur,
@@ -368,7 +369,7 @@ function buildHoldingRows(
       assetClass: "CASH",
       units: 0,
       unitsKnown: true,
-      effectiveDate: valuationDate ?? "",
+      effectiveDate: effectiveDate ?? valuationDate ?? "",
       priceEur: cashBalanceEur,
       priceScale: "absolute",
       marketValueEur: cashBalanceEur,
@@ -602,10 +603,18 @@ export function PortfolioDashboard({ data }: { data: AccountsData }) {
             selectedCashBalance,
             data.historicalMarketSeries,
             selectedTrendRow.date,
+            selectedTrendRow.date,
           )
-        : buildHoldingRows(analytics.positions, instrumentColorMap, selectedCashBalance);
+        : buildHoldingRows(
+            analytics.positions,
+            instrumentColorMap,
+            selectedCashBalance,
+            undefined,
+            undefined,
+            analytics.snapshot.positionsAsOf,
+          );
     },
-    [analytics.positions, cashBalance, data.historicalMarketSeries, historicalHoldingsAnalytics, instrumentColorMap, selectedTrendRow],
+    [analytics.positions, analytics.snapshot.positionsAsOf, cashBalance, data.historicalMarketSeries, historicalHoldingsAnalytics, instrumentColorMap, selectedTrendRow],
   );
 
   const sortedHoldingsRows = useMemo(() => {
