@@ -1,13 +1,53 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
+import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import { PDFParse } from "pdf-parse";
 
-const input = process.argv[2];
+process.stdout.on("error", (error) => {
+  if (error?.code === "EPIPE") {
+    process.exit(0);
+  }
+  throw error;
+});
 
-if (!input) {
-  console.error("Missing PDF URL or file path");
+function fail(message) {
+  console.error(message);
   process.exit(1);
+}
+
+function parseArgs(argv) {
+  let format = "text";
+  let input = "";
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--format") {
+      format = argv[index + 1] ?? "";
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--format=")) {
+      format = arg.slice("--format=".length);
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      fail(`Unknown option: ${arg}`);
+    }
+    if (input) {
+      fail("Expected a single PDF URL or file path");
+    }
+    input = arg;
+  }
+
+  if (!input) {
+    fail("Missing PDF URL or file path");
+  }
+  if (!["text", "fragments"].includes(format)) {
+    fail(`Unsupported format: ${format}`);
+  }
+
+  return { format, input };
 }
 
 const DEFAULT_HEADERS = {
@@ -73,12 +113,56 @@ async function loadPdfBytes(value) {
   return new Uint8Array(await readFile(value));
 }
 
-const data = await loadPdfBytes(input);
-const parser = new PDFParse({ data, disableWorker: true });
-
-try {
-  const result = await parser.getText();
-  process.stdout.write(result.text);
-} finally {
-  await parser.destroy();
+async function extractPdfText(data) {
+  const parser = new PDFParse({ data, disableWorker: true });
+  try {
+    const result = await parser.getText();
+    return result.text;
+  } finally {
+    await parser.destroy();
+  }
 }
+
+async function extractPdfFragments(data) {
+  const loadingTask = pdfjs.getDocument({
+    data,
+    isEvalSupported: false,
+    useWorkerFetch: false,
+  });
+  const document = await loadingTask.promise;
+
+  try {
+    const fragments = [];
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      try {
+        const content = await page.getTextContent();
+        for (const item of content.items) {
+          if (!("str" in item)) {
+            continue;
+          }
+          const text = item.str.replace(/\s+/g, " ").trim();
+          if (!text) {
+            continue;
+          }
+          fragments.push({
+            page: pageNumber,
+            x: Number(item.transform[4].toFixed(2)),
+            y: Number(item.transform[5].toFixed(2)),
+            text,
+          });
+        }
+      } finally {
+        page.cleanup();
+      }
+    }
+    return JSON.stringify(fragments);
+  } finally {
+    await loadingTask.destroy();
+  }
+}
+
+const { format, input } = parseArgs(process.argv.slice(2));
+const data = await loadPdfBytes(input);
+const output = format === "fragments" ? await extractPdfFragments(data) : await extractPdfText(data);
+process.stdout.write(output);

@@ -56,8 +56,11 @@ Track Republic is a local-first cashflow and portfolio analytics app for Trade R
 
 ### Requirements
 
-- macOS for PDF parsing through `PDFKit` + `swift`
 - Node.js
+- Python 3
+- Raw PDF import works on macOS, Windows, and Linux
+  - macOS uses `PDFKit` + `swift` when available
+  - Windows and Linux use the bundled `pdfjs-dist` fallback
 - Optional: Ollama for local transaction classification
 
 ### Install

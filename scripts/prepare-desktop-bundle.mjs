@@ -27,7 +27,6 @@ const SAFE_NODE_PACKAGES = [
   "pdf-parse",
   "pdfjs-dist",
   "@napi-rs/canvas",
-  "@napi-rs/canvas-darwin-arm64",
 ];
 
 const MANUAL_RULE_COLUMNS = [
@@ -122,6 +121,21 @@ async function copyNodePackage(packageName) {
   await cp(packagePath, targetPath, { recursive: true });
 }
 
+async function listInstalledOptionalPackages(packageName) {
+  const manifestPath = path.join(repoRoot, "node_modules", ...packageName.split("/"), "package.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const installed = [];
+
+  for (const dependency of Object.keys(manifest.optionalDependencies ?? {})) {
+    const dependencyPath = path.join(repoRoot, "node_modules", ...dependency.split("/"));
+    if (await pathExists(dependencyPath)) {
+      installed.push(dependency);
+    }
+  }
+
+  return installed;
+}
+
 async function main() {
   if (!(await pathExists(standaloneRoot))) {
     throw new Error("Next standalone output was not generated. Expected .next/standalone after build.");
@@ -174,7 +188,12 @@ async function main() {
     await cp(path.join(repoRoot, "scripts", scriptName), path.join(defaultsScriptsRoot, scriptName));
   }
 
-  for (const packageName of SAFE_NODE_PACKAGES) {
+  const safeNodePackages = [
+    ...SAFE_NODE_PACKAGES,
+    ...(await listInstalledOptionalPackages("@napi-rs/canvas")),
+  ];
+
+  for (const packageName of new Set(safeNodePackages)) {
     await copyNodePackage(packageName);
   }
 

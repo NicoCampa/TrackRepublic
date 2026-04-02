@@ -516,7 +516,10 @@ async function runCommand(job: PipelineJob, command: string, args: string[]) {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: ROOT,
-      env: process.env,
+      env: {
+        ...process.env,
+        TRACK_REPUBLIC_NODE: process.execPath,
+      },
     });
 
     let stdoutBuffer = "";
