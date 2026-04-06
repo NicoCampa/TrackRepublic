@@ -21,8 +21,11 @@ MAIN_HEADER = "DATUM TYP BESCHREIBUNG ZAHLUNGSEINGANG ZAHLUNGSAUSGANG SALDO"
 FUND_HEADER = "DATUM ZAHLUNGSART GELDMARKTFONDS STÜCK KURS PRO STÜCK BETRAG"
 TRANSACTION_HEADER_FIELDS = {"DATUM", "TYP", "BESCHREIBUNG", "SALDO"}
 FUND_HEADER_FIELDS = {"DATUM", "ZAHLUNGSART", "GELDMARKTFONDS", "STÜCK", "BETRAG"}
+MAIN_HEADER_IT = "DATA TIPO DESCRIZIONE IN ENTRATA IN USCITA SALDO"
+TRANSACTION_HEADER_FIELDS_IT = {"DATA", "TIPO", "DESCRIZIONE", "SALDO"}
 ROW_TOP_PADDING = 5.0
 KNOWN_TRANSACTION_TYPES = [
+    # German
     "SEPA-Lastschrift",
     "Kartentransaktion",
     "Überweisung",
@@ -32,6 +35,15 @@ KNOWN_TRANSACTION_TYPES = [
     "Ertrag",
     "Handel",
     "Steuern",
+    # Italian
+    "Invitare un amico",
+    "Transazione con carta",
+    "Bonifico",
+    "Commercio",
+    "Imposte",
+    "Interessi",
+    "Premio",
+    "Rendimento",
 ]
 EURO_RE = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d{2} €")
 ISIN_RE = re.compile(r"\b[A-Z0-9]{12}\b")
@@ -47,6 +59,7 @@ FUND_RE = re.compile(
     r"(?P<amount>-?\d{1,3}(?:\.\d{3})*,\d{2} €)$"
 )
 MONTHS = {
+    # German
     "Jan": "01",
     "Jan.": "01",
     "Feb": "02",
@@ -69,6 +82,19 @@ MONTHS = {
     "Okt.": "10",
     "Nov.": "11",
     "Dez.": "12",
+    # Italian (lowercase abbreviations as they appear in PDF)
+    "gen": "01",
+    "feb": "02",
+    "mar": "03",
+    "apr": "04",
+    "mag": "05",
+    "giu": "06",
+    "lug": "07",
+    "ago": "08",
+    "set": "09",
+    "ott": "10",
+    "nov": "11",
+    "dic": "12",
 }
 SWIFT_EXTRACTION_SCRIPT = r"""
 import Foundation
@@ -466,6 +492,7 @@ def run_node_extraction(pdf_path: Path) -> list[Fragment]:
             str(pdf_path),
         ],
         text=True,
+        encoding='utf-8',
     )
     decoded = json.loads(raw)
     return [Fragment(**item) for item in decoded]
@@ -538,15 +565,17 @@ def cluster_date_fragments(fragments: list[Fragment]) -> list[list[Fragment]]:
 
 
 def get_starting_balance(page_one_fragments: list[Fragment]) -> Decimal:
+    balance_labels = {"Cashkonto", "Conto corrente"}
     for fragment in page_one_fragments:
         normalized = normalize_fragment_text(fragment.text)
-        if normalized.startswith("Cashkonto "):
-            amounts = EURO_RE.findall(fragment.text)
-            if amounts:
-                return parse_euro(amounts[0])
+        for label in balance_labels:
+            if normalized.startswith(f"{label} "):
+                amounts = EURO_RE.findall(fragment.text)
+                if amounts:
+                    return parse_euro(amounts[0])
 
     for fragment in sorted(page_one_fragments, key=lambda item: (-item.y, item.x)):
-        if normalize_fragment_text(fragment.text) != "Cashkonto":
+        if normalize_fragment_text(fragment.text) not in balance_labels:
             continue
         same_band = sorted(
             [
@@ -567,11 +596,20 @@ def build_transaction_rows(
     page_number: int,
     page_fragments: list[Fragment],
 ) -> list[dict[str, object]]:
+    description_x_min = 160  # German default: BESCHREIBUNG starts beyond x=160
     header_y = find_header_y(
         page_fragments,
         exact_text=MAIN_HEADER,
         required_fields=TRANSACTION_HEADER_FIELDS,
     )
+    if header_y is None:
+        header_y = find_header_y(
+            page_fragments,
+            exact_text=MAIN_HEADER_IT,
+            required_fields=TRANSACTION_HEADER_FIELDS_IT,
+        )
+        if header_y is not None:
+            description_x_min = 140  # Italian: DESCRIZIONE at x≈150, TIPO at x≈102
     if header_y is None:
         return []
     content = [fragment for fragment in page_fragments if 95 < fragment.y < header_y - 1]
@@ -606,7 +644,7 @@ def build_transaction_rows(
                 else:
                     date_parts.append((fragment.y, fragment.text))
             else:
-                if fragment.x < 160:
+                if fragment.x < description_x_min:
                     lead_parts.append((fragment.y, fragment.text))
                 elif fragment.x < 360:
                     description_parts.append((fragment.y, fragment.text))
