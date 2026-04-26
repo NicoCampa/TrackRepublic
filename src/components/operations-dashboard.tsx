@@ -21,8 +21,21 @@ type ImportedTransactionRow = {
 
 const LOAD_DATA_USER_NAME_STORAGE_KEY = "track-republic-account-holder-name";
 const LOAD_DATA_MODEL_STORAGE_KEY = "track-republic-classifier-model";
+const LOAD_DATA_LANGUAGE_STORAGE_KEY = "track-republic-statement-language";
 const LOAD_DATA_PROMPT_STORAGE_KEY = "track-republic-classifier-prompt-addendum";
 const DEFAULT_CLASSIFIER_MODEL = "qwen3.5:9b";
+const STATEMENT_LANGUAGE_OPTIONS = [
+  { value: "de", label: "German" },
+  { value: "it", label: "Italian" },
+] as const;
+
+function normalizeStatementLanguage(value: string | undefined) {
+  return value === "it" ? "it" : "de";
+}
+
+function statementLanguageLabel(value: string | undefined) {
+  return STATEMENT_LANGUAGE_OPTIONS.find((option) => option.value === normalizeStatementLanguage(value))?.label ?? "German";
+}
 
 function formatPipelineMode(mode: string) {
   switch (mode) {
@@ -95,6 +108,13 @@ export function OperationsDashboard({ data }: { data: OperationsData }) {
       return fallbackModel;
     }
     return window.localStorage.getItem(LOAD_DATA_MODEL_STORAGE_KEY) ?? fallbackModel;
+  });
+  const [statementLanguage, setStatementLanguage] = useState(() => {
+    const fallbackLanguage = normalizeStatementLanguage(data.pipelineSummary?.statementLanguage?.trim());
+    if (typeof window === "undefined") {
+      return fallbackLanguage;
+    }
+    return normalizeStatementLanguage(window.localStorage.getItem(LOAD_DATA_LANGUAGE_STORAGE_KEY) ?? fallbackLanguage);
   });
   const [classifierPrompt, setClassifierPrompt] = useState(() => {
     if (typeof window === "undefined") {
@@ -175,6 +195,13 @@ export function OperationsDashboard({ data }: { data: OperationsData }) {
     if (typeof window === "undefined") {
       return;
     }
+    window.localStorage.setItem(LOAD_DATA_LANGUAGE_STORAGE_KEY, normalizeStatementLanguage(statementLanguage));
+  }, [statementLanguage]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
     if (classifierPrompt) {
       window.localStorage.setItem(LOAD_DATA_PROMPT_STORAGE_KEY, classifierPrompt);
       return;
@@ -201,6 +228,7 @@ export function OperationsDashboard({ data }: { data: OperationsData }) {
     if (classifierModel.trim()) {
       formData.set("model", classifierModel.trim());
     }
+    formData.set("statementLanguage", normalizeStatementLanguage(statementLanguage));
 
     const response = await fetch("/api/pipeline", {
       method: "POST",
@@ -221,7 +249,7 @@ export function OperationsDashboard({ data }: { data: OperationsData }) {
     setFile(null);
   };
 
-  const activeSummary = job?.summary ?? pipelineSummary;
+  const activeSummary = job?.summary ?? (isJobRunning ? null : pipelineSummary);
   const isFailed = job?.status === "failed" || (!job && activeSummary?.status === "failed");
   const isDuplicateSkip = activeSummary?.status === "completed" && activeSummary.published === false;
   const statusTone = isFailed ? "error" : isDuplicateSkip ? "default" : job?.status === "completed" ? "success" : "default";
@@ -235,6 +263,8 @@ export function OperationsDashboard({ data }: { data: OperationsData }) {
           : activeSummary
             ? "Latest import"
             : "";
+  const fallbackClassifications = activeSummary?.fallbackClassifications ?? 0;
+  const overlapDuplicatesDropped = activeSummary?.overlapDuplicatesDropped ?? 0;
   const statusMeta = job?.status === "running"
     ? job.step
     : isFailed
@@ -242,7 +272,15 @@ export function OperationsDashboard({ data }: { data: OperationsData }) {
       : isDuplicateSkip
         ? "This statement was already imported."
         : activeSummary?.completedAt
-          ? `${formatPipelineMode(activeSummary.mode)} on ${formatAsOfDate(activeSummary.completedAt.slice(0, 10))}`
+          ? [
+              `${formatPipelineMode(activeSummary.mode)} on ${formatAsOfDate(activeSummary.completedAt.slice(0, 10))}`,
+              overlapDuplicatesDropped > 0
+                ? `${formatCount(overlapDuplicatesDropped)} overlapping row${overlapDuplicatesDropped === 1 ? "" : "s"} skipped`
+                : "",
+              fallbackClassifications > 0
+                ? `${formatCount(fallbackClassifications)} local AI fallback${fallbackClassifications === 1 ? "" : "s"}`
+                : "",
+            ].filter(Boolean).join(" · ")
           : "Choose a statement PDF to build the dataset.";
   const progressPercent =
     job?.progress?.percent ??
@@ -332,6 +370,11 @@ export function OperationsDashboard({ data }: { data: OperationsData }) {
         render: (_, row) => <CategoryEditor row={row} />,
       },
       {
+        key: "classificationSourceLabel",
+        label: "Source",
+        cellClassName: "cell-nowrap",
+      },
+      {
         key: "signedAmount",
         label: "Amount",
         align: "right",
@@ -364,6 +407,22 @@ export function OperationsDashboard({ data }: { data: OperationsData }) {
       ? {
           label: "Model",
           value: classifierModel.trim(),
+        }
+      : null,
+    {
+      label: "Language",
+      value: statementLanguageLabel(statementLanguage),
+    },
+    fallbackClassifications > 0
+      ? {
+          label: "AI fallbacks",
+          value: formatCount(fallbackClassifications),
+        }
+      : null,
+    overlapDuplicatesDropped > 0
+      ? {
+          label: "Overlaps skipped",
+          value: formatCount(overlapDuplicatesDropped),
         }
       : null,
     ...progressFacts,
@@ -457,6 +516,25 @@ export function OperationsDashboard({ data }: { data: OperationsData }) {
                         onChange={(event) => setAccountHolderName(event.target.value)}
                       />
                       <span className="field-help">Used only to detect transfers between your own accounts.</span>
+                    </div>
+
+                    <div className="field">
+                      <label htmlFor="loadDataStatementLanguage">Statement language</label>
+                      <select
+                        id="loadDataStatementLanguage"
+                        value={normalizeStatementLanguage(statementLanguage)}
+                        disabled={isJobRunning}
+                        onChange={(event) => setStatementLanguage(normalizeStatementLanguage(event.target.value))}
+                      >
+                        {STATEMENT_LANGUAGE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="field-help">
+                        Selects the curated Trade Republic examples used during categorization.
+                      </span>
                     </div>
 
                     <div className="button-row load-data-simple-actions">

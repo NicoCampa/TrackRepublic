@@ -38,6 +38,8 @@ export async function POST(request: Request) {
   const userName = typeof userNameValue === "string" ? userNameValue.trim() : "";
   const modelValue = formData.get("model");
   const model = typeof modelValue === "string" ? modelValue.trim() : "";
+  const statementLanguageValue = formData.get("statementLanguage");
+  const statementLanguage = typeof statementLanguageValue === "string" ? statementLanguageValue.trim() : "";
   const fileValue = formData.get("file");
   const file = fileValue instanceof File ? fileValue : undefined;
   if (mode === "parse_classify" && !file) {
@@ -48,6 +50,7 @@ export async function POST(request: Request) {
     promptAddendum,
     userName,
     model,
+    statementLanguage,
   });
   return NextResponse.json({ job });
 }

@@ -34,13 +34,7 @@ Rules:
 - Crypto ETN or ETP products stay crypto even if they are exchange-traded notes.
 - Gold ETC or physically backed gold ETP products are commodity, not etf.
 Examples:
-- "Buy trade Bundesrepublik Deutschland 2.10% 15/04/2029 ..." -> bond
-- "Buy trade Microsoft Corp 3.125% 06/15/2030 ..." -> bond
-- "Savings plan execution iShares Euro Government Bond UCITS ETF ..." -> etf
-- "Buy trade iShares Physical Gold ETC ..." -> commodity
-- "Buy trade Bitcoin ETN ..." -> crypto
-- "Buy trade Moonfare Private Equity ELTIF ..." -> private_market
-- "Buy trade Apple ..." -> stock
+{{asset_class_language_examples}}
 Field hints:
 - category is the category from the first classification pass.
 - type is the raw transaction type from the statement and may be in German or another European language.

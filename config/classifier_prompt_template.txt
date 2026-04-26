@@ -41,11 +41,7 @@ Decision order:
 - If it is a bank fee, broker fee, platform fee, trading commission, penalty, or administrative charge and no better category fits, use fees.
 - If it is a broker-platform row with no clear instrument and it looks like a fee, tax, or cash movement rather than a trade, do not use investing.
 Examples:
-- "Kuponzahlung Bundesrepublik Deutschland 2.10% 15/04/2029 ..." -> interest_dividend
-- "Zinszahlung Frankreich 3.00% 25/05/2033 ..." -> interest_dividend
-- "Buy trade Bundesrepublik Deutschland 2.10% 15/04/2029 ..." -> investing
-- "Savings plan execution iShares Euro Government Bond UCITS ETF ..." -> investing
-- "Buy trade Bitcoin ETN ..." -> crypto
+{{category_language_examples}}
 Field hints:
 - type is the raw transaction type from the statement and may be in German or another European language.
 - description is the raw transaction description from the statement.

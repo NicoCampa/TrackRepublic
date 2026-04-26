@@ -24,6 +24,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANUAL_RULES = PROJECT_ROOT / "config" / "manual_category_rules.csv"
 DEFAULT_PROMPT_TEMPLATE_PATH = PROJECT_ROOT / "config" / "classifier_prompt_template.txt"
 DEFAULT_ASSET_CLASS_PROMPT_TEMPLATE_PATH = PROJECT_ROOT / "config" / "investment_asset_class_prompt_template.txt"
+DEFAULT_STATEMENT_LANGUAGE = "de"
+SUPPORTED_STATEMENT_LANGUAGES = ("de", "it")
 ALLOWED_CATEGORIES = [
     "salary",
     "bonus_cashback",
@@ -105,94 +107,185 @@ FIXED_COST_CATEGORIES = {
     "utilities",
 }
 
-CURATED_CATEGORY_PROMPT_EXAMPLES = [
-    {
-        "type": "Kuponzahlung",
-        "description": "Kuponzahlung Bundesrepublik Deutschland 2.10% 15/04/2029 DE000BU25018",
-        "category": "interest_dividend",
-    },
-    {
-        "type": "Zinszahlung",
-        "description": "Zinszahlung Frankreich 3.00% 25/05/2033 FR001400H7V7",
-        "category": "interest_dividend",
-    },
-    {
-        "type": "Buy trade",
-        "description": "Buy trade Bundesrepublik Deutschland 2.10% 15/04/2029 DE000BU25018",
-        "category": "investing",
-    },
-    {
-        "type": "Savings plan execution",
-        "description": "Savings plan execution iShares Euro Government Bond 1-3yr UCITS ETF IE00B14X4Q57",
-        "category": "investing",
-    },
-    {
-        "type": "Ertrag",
-        "description": "Ertrag iShares USD Treasury Bond 7-10yr UCITS ETF IE00B1FZS798",
-        "category": "interest_dividend",
-    },
-    {
-        "type": "Buy trade",
-        "description": "Buy trade iShares Physical Gold ETC IE00B4ND3602",
-        "category": "investing",
-    },
-    {
-        "type": "Buy trade",
-        "description": "Buy trade Bitcoin ETN XS2100000001",
-        "category": "crypto",
-    },
-]
+CURATED_CATEGORY_PROMPT_EXAMPLES_BY_LANGUAGE = {
+    "de": [
+        {
+            "type": "Kuponzahlung",
+            "description": "Kuponzahlung Bundesrepublik Deutschland 2.10% 15/04/2029 DE000BU25018",
+            "category": "interest_dividend",
+        },
+        {
+            "type": "Zinszahlung",
+            "description": "Zinszahlung Frankreich 3.00% 25/05/2033 FR001400H7V7",
+            "category": "interest_dividend",
+        },
+        {
+            "type": "Buy trade",
+            "description": "Buy trade Bundesrepublik Deutschland 2.10% 15/04/2029 DE000BU25018",
+            "category": "investing",
+        },
+        {
+            "type": "Savings plan execution",
+            "description": "Savings plan execution iShares Euro Government Bond 1-3yr UCITS ETF IE00B14X4Q57",
+            "category": "investing",
+        },
+        {
+            "type": "Ertrag",
+            "description": "Ertrag iShares USD Treasury Bond 7-10yr UCITS ETF IE00B1FZS798",
+            "category": "interest_dividend",
+        },
+        {
+            "type": "Buy trade",
+            "description": "Buy trade iShares Physical Gold ETC IE00B4ND3602",
+            "category": "investing",
+        },
+        {
+            "type": "Buy trade",
+            "description": "Buy trade Bitcoin ETN XS2100000001",
+            "category": "crypto",
+        },
+    ],
+    "it": [
+        {
+            "type": "Pagamento cedola",
+            "description": "Pagamento cedola Repubblica Federale di Germania 2.10% 15/04/2029 DE000BU25018",
+            "category": "interest_dividend",
+        },
+        {
+            "type": "Interessi",
+            "description": "Pagamento interessi Francia 3.00% 25/05/2033 FR001400H7V7",
+            "category": "interest_dividend",
+        },
+        {
+            "type": "Commercio",
+            "description": "Esecuzione ordine acquisto Repubblica Federale di Germania 2.10% 15/04/2029 DE000BU25018",
+            "category": "investing",
+        },
+        {
+            "type": "Commercio",
+            "description": "Esecuzione piano di accumulo iShares Euro Government Bond 1-3yr UCITS ETF IE00B14X4Q57",
+            "category": "investing",
+        },
+        {
+            "type": "Rendimento",
+            "description": "Rendimento iShares USD Treasury Bond 7-10yr UCITS ETF IE00B1FZS798",
+            "category": "interest_dividend",
+        },
+        {
+            "type": "Commercio",
+            "description": "Esecuzione ordine acquisto iShares Physical Gold ETC IE00B4ND3602",
+            "category": "investing",
+        },
+        {
+            "type": "Commercio",
+            "description": "Esecuzione ordine acquisto Bitcoin ETN XS2100000001",
+            "category": "crypto",
+        },
+    ],
+}
 
-CURATED_ASSET_CLASS_PROMPT_EXAMPLES = [
-    {
-        "category": "investing",
-        "type": "Buy trade",
-        "description": "Buy trade Bundesrepublik Deutschland 2.10% 15/04/2029 DE000BU25018",
-        "asset_class": "bond",
-    },
-    {
-        "category": "investing",
-        "type": "Buy trade",
-        "description": "Buy trade Microsoft Corp 3.125% 06/15/2030 US594918CF95",
-        "asset_class": "bond",
-    },
-    {
-        "category": "investing",
-        "type": "Savings plan execution",
-        "description": "Savings plan execution iShares Euro Government Bond 1-3yr UCITS ETF IE00B14X4Q57",
-        "asset_class": "etf",
-    },
-    {
-        "category": "investing",
-        "type": "Buy trade",
-        "description": "Buy trade Xtrackers II Global Government Bond UCITS ETF 1C LU0908508731",
-        "asset_class": "etf",
-    },
-    {
-        "category": "investing",
-        "type": "Buy trade",
-        "description": "Buy trade iShares Physical Gold ETC IE00B4ND3602",
-        "asset_class": "commodity",
-    },
-    {
-        "category": "investing",
-        "type": "Buy trade",
-        "description": "Buy trade Bitcoin ETN XS2100000001",
-        "asset_class": "crypto",
-    },
-    {
-        "category": "investing",
-        "type": "Buy trade",
-        "description": "Buy trade Moonfare Private Equity ELTIF",
-        "asset_class": "private_market",
-    },
-    {
-        "category": "investing",
-        "type": "Buy trade",
-        "description": "Buy trade Apple US0378331005",
-        "asset_class": "stock",
-    },
-]
+CURATED_ASSET_CLASS_PROMPT_EXAMPLES_BY_LANGUAGE = {
+    "de": [
+        {
+            "category": "investing",
+            "type": "Buy trade",
+            "description": "Buy trade Bundesrepublik Deutschland 2.10% 15/04/2029 DE000BU25018",
+            "asset_class": "bond",
+        },
+        {
+            "category": "investing",
+            "type": "Buy trade",
+            "description": "Buy trade Microsoft Corp 3.125% 06/15/2030 US594918CF95",
+            "asset_class": "bond",
+        },
+        {
+            "category": "investing",
+            "type": "Savings plan execution",
+            "description": "Savings plan execution iShares Euro Government Bond 1-3yr UCITS ETF IE00B14X4Q57",
+            "asset_class": "etf",
+        },
+        {
+            "category": "investing",
+            "type": "Buy trade",
+            "description": "Buy trade Xtrackers II Global Government Bond UCITS ETF 1C LU0908508731",
+            "asset_class": "etf",
+        },
+        {
+            "category": "investing",
+            "type": "Buy trade",
+            "description": "Buy trade iShares Physical Gold ETC IE00B4ND3602",
+            "asset_class": "commodity",
+        },
+        {
+            "category": "investing",
+            "type": "Buy trade",
+            "description": "Buy trade Bitcoin ETN XS2100000001",
+            "asset_class": "crypto",
+        },
+        {
+            "category": "investing",
+            "type": "Buy trade",
+            "description": "Buy trade Moonfare Private Equity ELTIF",
+            "asset_class": "private_market",
+        },
+        {
+            "category": "investing",
+            "type": "Buy trade",
+            "description": "Buy trade Apple US0378331005",
+            "asset_class": "stock",
+        },
+    ],
+    "it": [
+        {
+            "category": "investing",
+            "type": "Commercio",
+            "description": "Esecuzione ordine acquisto Repubblica Federale di Germania 2.10% 15/04/2029 DE000BU25018",
+            "asset_class": "bond",
+        },
+        {
+            "category": "investing",
+            "type": "Commercio",
+            "description": "Esecuzione ordine acquisto Microsoft Corp 3.125% 06/15/2030 US594918CF95",
+            "asset_class": "bond",
+        },
+        {
+            "category": "investing",
+            "type": "Commercio",
+            "description": "Esecuzione piano di accumulo iShares Euro Government Bond 1-3yr UCITS ETF IE00B14X4Q57",
+            "asset_class": "etf",
+        },
+        {
+            "category": "investing",
+            "type": "Commercio",
+            "description": "Esecuzione ordine acquisto Xtrackers II Global Government Bond UCITS ETF 1C LU0908508731",
+            "asset_class": "etf",
+        },
+        {
+            "category": "investing",
+            "type": "Commercio",
+            "description": "Esecuzione ordine acquisto iShares Physical Gold ETC IE00B4ND3602",
+            "asset_class": "commodity",
+        },
+        {
+            "category": "investing",
+            "type": "Commercio",
+            "description": "Esecuzione ordine acquisto Bitcoin ETN XS2100000001",
+            "asset_class": "crypto",
+        },
+        {
+            "category": "investing",
+            "type": "Commercio",
+            "description": "Esecuzione ordine acquisto Moonfare Private Equity ELTIF",
+            "asset_class": "private_market",
+        },
+        {
+            "category": "investing",
+            "type": "Commercio",
+            "description": "Esecuzione ordine acquisto Apple US0378331005",
+            "asset_class": "stock",
+        },
+    ],
+}
 
 
 def english_output_name(value: str) -> str:
@@ -312,7 +405,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional path to a prompt template override. "
-            "Supports {{response_example_json}}, {{taxonomy}}, and {{account_holder_hint}} placeholders. "
+            "Supports {{response_example_json}}, {{taxonomy}}, {{account_holder_hint}}, "
+            "and {{category_language_examples}} placeholders. "
             "Examples, extra instructions, and transactions are appended automatically."
         ),
     )
@@ -320,6 +414,15 @@ def parse_args() -> argparse.Namespace:
         "--user-name",
         default="",
         help="Optional account holder name used to detect internal transfers mentioning the user's own name.",
+    )
+    parser.add_argument(
+        "--statement-language",
+        default=DEFAULT_STATEMENT_LANGUAGE,
+        choices=SUPPORTED_STATEMENT_LANGUAGES,
+        help=(
+            "Language profile for curated classifier examples. "
+            f"Choices: {', '.join(SUPPORTED_STATEMENT_LANGUAGES)}. Default: {DEFAULT_STATEMENT_LANGUAGE}."
+        ),
     )
     return parser.parse_args()
 
@@ -355,6 +458,13 @@ def normalize_category(category: Optional[str]) -> str:
     if not value:
         return ""
     return CATEGORY_ALIASES.get(value, value)
+
+
+def normalize_statement_language(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in SUPPORTED_STATEMENT_LANGUAGES:
+        return normalized
+    return DEFAULT_STATEMENT_LANGUAGE
 
 
 def normalize_asset_class(value: Optional[str]) -> str:
@@ -422,6 +532,26 @@ def format_asset_class_taxonomy_for_prompt() -> str:
         f"- {asset_class}: {asset_class_descriptions[asset_class]}"
         for asset_class in ALLOWED_ASSET_CLASSES
     )
+
+
+def format_language_examples_for_prompt(
+    examples_by_language: dict[str, list[dict[str, str]]],
+    statement_language: str,
+    output_key: str,
+    limit: int = 7,
+) -> str:
+    examples = examples_by_language.get(
+        normalize_statement_language(statement_language),
+        examples_by_language[DEFAULT_STATEMENT_LANGUAGE],
+    )
+    lines = []
+    for example in examples[:limit]:
+        description = clean_optional_text(example.get("description"))
+        output_value = clean_optional_text(example.get(output_key))
+        if description and output_value:
+            lines.append(f'- "{description}" -> {output_value}')
+    return "\n".join(lines)
+
 
 def load_prompt_addendum(path_value: Optional[str]) -> str:
     if not path_value:
@@ -637,6 +767,7 @@ def normalize_cached_classification(raw: dict) -> dict:
 def build_category_prompt_examples(
     manual_rules: list[ManualRule],
     row_overrides: dict[str, RowOverride],
+    statement_language: str = DEFAULT_STATEMENT_LANGUAGE,
     limit: int = 12,
 ) -> list[dict[str, str]]:
     examples: list[dict[str, str]] = []
@@ -668,7 +799,11 @@ def build_category_prompt_examples(
             example["type"] = normalized_type
         examples.append(example)
 
-    for example in CURATED_CATEGORY_PROMPT_EXAMPLES:
+    curated_examples = CURATED_CATEGORY_PROMPT_EXAMPLES_BY_LANGUAGE.get(
+        normalize_statement_language(statement_language),
+        CURATED_CATEGORY_PROMPT_EXAMPLES_BY_LANGUAGE[DEFAULT_STATEMENT_LANGUAGE],
+    )
+    for example in curated_examples:
         add_example(example.get("type"), None, example.get("description"), example.get("category"))
         if len(examples) >= limit:
             return examples[:limit]
@@ -690,6 +825,7 @@ def build_category_prompt_examples(
 
 def build_asset_class_prompt_examples(
     row_overrides: dict[str, RowOverride],
+    statement_language: str = DEFAULT_STATEMENT_LANGUAGE,
     limit: int = 12,
 ) -> list[dict[str, str]]:
     examples: list[dict[str, str]] = []
@@ -727,7 +863,11 @@ def build_asset_class_prompt_examples(
             example["type"] = normalized_type
         examples.append(example)
 
-    for example in CURATED_ASSET_CLASS_PROMPT_EXAMPLES:
+    curated_examples = CURATED_ASSET_CLASS_PROMPT_EXAMPLES_BY_LANGUAGE.get(
+        normalize_statement_language(statement_language),
+        CURATED_ASSET_CLASS_PROMPT_EXAMPLES_BY_LANGUAGE[DEFAULT_STATEMENT_LANGUAGE],
+    )
+    for example in curated_examples:
         add_example(
             example.get("category"),
             example.get("type"),
@@ -773,6 +913,7 @@ def build_prompt_fingerprint(
     asset_class_prompt_template: str,
     prompt_addendum: str,
     account_holder_name: str,
+    statement_language: str,
     prompt_examples: list[dict[str, str]],
     asset_class_prompt_examples: list[dict[str, str]],
 ) -> str:
@@ -782,6 +923,7 @@ def build_prompt_fingerprint(
         "asset_class_template": asset_class_prompt_template.strip() or DEFAULT_ASSET_CLASS_PROMPT_TEMPLATE,
         "addendum": prompt_addendum.strip(),
         "account_holder_name": re.sub(r"\s+", " ", account_holder_name).strip(),
+        "statement_language": normalize_statement_language(statement_language),
         "examples": prompt_examples,
         "asset_class_examples": asset_class_prompt_examples,
     }
@@ -839,6 +981,20 @@ def sanitize_asset_class_classification(raw: dict, category: str) -> dict:
     }
 
 
+def describe_classifier_exception(exc: Exception) -> str:
+    message = str(exc).strip()
+    if not message:
+        return exc.__class__.__name__
+    return f"{exc.__class__.__name__}: {message}"
+
+
+def summarize_classification_item(item: ClassificationItem) -> str:
+    description = re.sub(r"\s+", " ", item.description).strip()
+    if len(description) > 120:
+        description = f"{description[:117]}..."
+    return f"type={item.tx_type!r}, amount={item.amount_eur!r}, description={description!r}"
+
+
 def ollama_chat(model: str, prompt: str, response_schema: dict, timeout_seconds: int) -> str:
     payload = {
         "model": model,
@@ -866,6 +1022,7 @@ def build_category_prompt(
     prompt_template: str = "",
     prompt_addendum: str = "",
     account_holder_name: str = "",
+    statement_language: str = DEFAULT_STATEMENT_LANGUAGE,
     prompt_examples: Optional[list[dict[str, str]]] = None,
 ) -> str:
     example_shape = {
@@ -906,6 +1063,11 @@ def build_category_prompt(
             "response_example_json": json.dumps(example_shape, ensure_ascii=False),
             "taxonomy": format_category_taxonomy_for_prompt(),
             "account_holder_hint": account_holder_block,
+            "category_language_examples": format_language_examples_for_prompt(
+                CURATED_CATEGORY_PROMPT_EXAMPLES_BY_LANGUAGE,
+                statement_language,
+                "category",
+            ),
         },
     )
     prompt_examples = prompt_examples or []
@@ -928,6 +1090,7 @@ def build_asset_class_prompt(
     items: list[ClassificationItem],
     prompt_addendum: str = "",
     asset_class_prompt_template: str = "",
+    statement_language: str = DEFAULT_STATEMENT_LANGUAGE,
     prompt_examples: Optional[list[dict[str, str]]] = None,
 ) -> str:
     example_shape = {
@@ -961,6 +1124,11 @@ def build_asset_class_prompt(
         {
             "response_example_json": json.dumps(example_shape, ensure_ascii=False),
             "asset_class_taxonomy": format_asset_class_taxonomy_for_prompt(),
+            "asset_class_language_examples": format_language_examples_for_prompt(
+                CURATED_ASSET_CLASS_PROMPT_EXAMPLES_BY_LANGUAGE,
+                statement_language,
+                "asset_class",
+            ),
         },
     )
     parts = [static_prompt]
@@ -985,6 +1153,7 @@ def call_category_llm_batch(
     prompt_template: str = "",
     prompt_addendum: str = "",
     account_holder_name: str = "",
+    statement_language: str = DEFAULT_STATEMENT_LANGUAGE,
     prompt_examples: Optional[list[dict[str, str]]] = None,
 ) -> dict[str, dict]:
     response_schema = {
@@ -1011,6 +1180,7 @@ def call_category_llm_batch(
         prompt_template=prompt_template,
         prompt_addendum=prompt_addendum,
         account_holder_name=account_holder_name,
+        statement_language=statement_language,
         prompt_examples=prompt_examples,
     )
     content = ollama_chat(model=model, prompt=prompt, response_schema=response_schema, timeout_seconds=240)
@@ -1045,6 +1215,7 @@ def call_asset_class_llm_batch(
     items: list[ClassificationItem],
     prompt_addendum: str = "",
     asset_class_prompt_template: str = "",
+    statement_language: str = DEFAULT_STATEMENT_LANGUAGE,
     prompt_examples: Optional[list[dict[str, str]]] = None,
 ) -> dict[str, dict]:
     response_schema = {
@@ -1070,6 +1241,7 @@ def call_asset_class_llm_batch(
         items,
         prompt_addendum=prompt_addendum,
         asset_class_prompt_template=asset_class_prompt_template,
+        statement_language=statement_language,
         prompt_examples=prompt_examples,
     )
     content = ollama_chat(model=model, prompt=prompt, response_schema=response_schema, timeout_seconds=240)
@@ -1106,6 +1278,7 @@ def classify_categories_with_llm(
     prompt_template: str = "",
     prompt_addendum: str = "",
     account_holder_name: str = "",
+    statement_language: str = DEFAULT_STATEMENT_LANGUAGE,
     prompt_examples: Optional[list[dict[str, str]]] = None,
 ) -> dict[str, dict]:
     if not items:
@@ -1118,17 +1291,35 @@ def classify_categories_with_llm(
             prompt_template=prompt_template,
             prompt_addendum=prompt_addendum,
             account_holder_name=account_holder_name,
+            statement_language=statement_language,
             prompt_examples=prompt_examples,
         )
     except (json.JSONDecodeError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+        error_summary = describe_classifier_exception(exc)
         if len(items) == 1:
             item = items[0]
+            print(
+                (
+                    "Classifier fallback: category classification failed with "
+                    f"{model} for {summarize_classification_item(item)}. "
+                    f"Reason: {error_summary}. Returning category=other."
+                ),
+                file=sys.stderr,
+            )
             return {
                 item.cache_key: default_classification(
                     category="other",
                     source="fallback",
                 )
             }
+        print(
+            (
+                "Classifier warning: category batch failed with "
+                f"{model} for {len(items)} items. Reason: {error_summary}. "
+                "Retrying smaller batches."
+            ),
+            file=sys.stderr,
+        )
         middle = max(1, len(items) // 2)
         left = classify_categories_with_llm(
             model=model,
@@ -1136,6 +1327,7 @@ def classify_categories_with_llm(
             prompt_template=prompt_template,
             prompt_addendum=prompt_addendum,
             account_holder_name=account_holder_name,
+            statement_language=statement_language,
             prompt_examples=prompt_examples,
         )
         right = classify_categories_with_llm(
@@ -1144,6 +1336,7 @@ def classify_categories_with_llm(
             prompt_template=prompt_template,
             prompt_addendum=prompt_addendum,
             account_holder_name=account_holder_name,
+            statement_language=statement_language,
             prompt_examples=prompt_examples,
         )
         return {**left, **right}
@@ -1154,6 +1347,7 @@ def classify_asset_classes_with_llm(
     items: list[ClassificationItem],
     prompt_addendum: str = "",
     asset_class_prompt_template: str = "",
+    statement_language: str = DEFAULT_STATEMENT_LANGUAGE,
     prompt_examples: Optional[list[dict[str, str]]] = None,
 ) -> dict[str, dict]:
     if not items:
@@ -1165,23 +1359,42 @@ def classify_asset_classes_with_llm(
             items=items,
             prompt_addendum=prompt_addendum,
             asset_class_prompt_template=asset_class_prompt_template,
+            statement_language=statement_language,
             prompt_examples=prompt_examples,
         )
-    except (json.JSONDecodeError, urllib.error.URLError, TimeoutError, ValueError):
+    except (json.JSONDecodeError, urllib.error.URLError, TimeoutError, ValueError) as exc:
+        error_summary = describe_classifier_exception(exc)
         if len(items) == 1:
             item = items[0]
+            print(
+                (
+                    "Classifier fallback: asset-class classification failed with "
+                    f"{model} for {summarize_classification_item(item)}. "
+                    f"Reason: {error_summary}. Returning asset_class=other."
+                ),
+                file=sys.stderr,
+            )
             return {
                 item.cache_key: {
                     "asset_class": "crypto" if item.sign == "crypto" else "other",
                     "source": "fallback",
                 }
             }
+        print(
+            (
+                "Classifier warning: asset-class batch failed with "
+                f"{model} for {len(items)} items. Reason: {error_summary}. "
+                "Retrying smaller batches."
+            ),
+            file=sys.stderr,
+        )
         middle = max(1, len(items) // 2)
         left = classify_asset_classes_with_llm(
             model=model,
             items=items[:middle],
             prompt_addendum=prompt_addendum,
             asset_class_prompt_template=asset_class_prompt_template,
+            statement_language=statement_language,
             prompt_examples=prompt_examples,
         )
         right = classify_asset_classes_with_llm(
@@ -1189,6 +1402,7 @@ def classify_asset_classes_with_llm(
             items=items[middle:],
             prompt_addendum=prompt_addendum,
             asset_class_prompt_template=asset_class_prompt_template,
+            statement_language=statement_language,
             prompt_examples=prompt_examples,
         )
         return {**left, **right}
@@ -1494,13 +1708,15 @@ def main() -> None:
     asset_class_prompt_template = DEFAULT_ASSET_CLASS_PROMPT_TEMPLATE
     prompt_addendum = load_prompt_addendum(args.prompt_addendum_file)
     account_holder_name = re.sub(r"\s+", " ", args.user_name).strip()
-    prompt_examples = build_category_prompt_examples(manual_rules, row_overrides)
-    asset_class_prompt_examples = build_asset_class_prompt_examples(row_overrides)
+    statement_language = normalize_statement_language(args.statement_language)
+    prompt_examples = build_category_prompt_examples(manual_rules, row_overrides, statement_language=statement_language)
+    asset_class_prompt_examples = build_asset_class_prompt_examples(row_overrides, statement_language=statement_language)
     prompt_fingerprint = build_prompt_fingerprint(
         prompt_template=prompt_template,
         asset_class_prompt_template=asset_class_prompt_template,
         prompt_addendum=prompt_addendum,
         account_holder_name=account_holder_name,
+        statement_language=statement_language,
         prompt_examples=prompt_examples,
         asset_class_prompt_examples=asset_class_prompt_examples,
     )
@@ -1511,12 +1727,12 @@ def main() -> None:
             print(f"No row overrides loaded from {row_overrides_path}.", file=sys.stderr)
     if prompt_examples:
         print(
-            f"Loaded {len(prompt_examples)} category prompt examples from curated, manual, and rule precedents.",
+            f"Loaded {len(prompt_examples)} category prompt examples for language {statement_language} from curated, manual, and rule precedents.",
             file=sys.stderr,
         )
     if asset_class_prompt_examples:
         print(
-            f"Loaded {len(asset_class_prompt_examples)} asset-class prompt examples from curated and manual corrections.",
+            f"Loaded {len(asset_class_prompt_examples)} asset-class prompt examples for language {statement_language} from curated and manual corrections.",
             file=sys.stderr,
         )
 
@@ -1572,6 +1788,7 @@ def main() -> None:
                 prompt_template=prompt_template,
                 prompt_addendum=prompt_addendum,
                 account_holder_name=account_holder_name,
+                statement_language=statement_language,
                 prompt_examples=prompt_examples,
             )
             for cache_key, classification in batch_results.items():
@@ -1610,6 +1827,7 @@ def main() -> None:
                     items=batch,
                     prompt_addendum=prompt_addendum,
                     asset_class_prompt_template=asset_class_prompt_template,
+                    statement_language=statement_language,
                     prompt_examples=asset_class_prompt_examples,
                 )
                 for cache_key, asset_classification in batch_results.items():
@@ -1775,11 +1993,13 @@ def main() -> None:
             summary_json_path,
             {
                 "model": args.model,
+                "statement_language": statement_language,
                 "transaction_row_count": len(transactions),
                 "cache_entry_count": len(cache_entries),
                 "cache_hits": resolution_counts["cache"],
                 "cache_misses": resolution_counts["llm"] + resolution_counts["fallback"],
                 "llm_classifications": resolution_counts["llm"],
+                "fallback_classifications": resolution_counts["fallback"],
                 "row_override_hits": row_override_hits,
                 "output_files": output_files,
                 "timestamps": {

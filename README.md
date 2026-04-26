@@ -1,6 +1,6 @@
 # Track Republic
 
-Track Republic is a local-first cashflow and portfolio analytics app for Trade Republic exports. It turns statement PDFs into structured transaction data, classifies rows with rules plus local LLM prompts, and gives you a desktop-quality dashboard for cashflow, trend, transaction cleanup, and portfolio performance.
+Track Republic is a local-first cashflow and portfolio analytics app for Trade Republic exports. It turns statement PDFs into structured transaction data, classifies rows with cached local LLM prompts and manual overrides, and gives you a desktop-quality dashboard for cashflow, trend, transaction cleanup, and portfolio performance.
 
 <p align="center">
   <img src="docs/screenshots/cashflow-overview.png" alt="Track Republic cashflow dashboard" width="100%" />
@@ -10,7 +10,7 @@ Track Republic is a local-first cashflow and portfolio analytics app for Trade R
 
 - Local-first: data, rules, prompts, and overrides stay in your workspace
 - Built for Trade Republic statements, cash accounts, and portfolio activity
-- Rules plus LLM classification with editable transaction and investment overrides
+- German and Italian statement classification with editable transaction and investment overrides
 - Runs as both a Next.js app and a native Tauri desktop shell
 
 ## Screens
@@ -39,7 +39,7 @@ Track Republic is a local-first cashflow and portfolio analytics app for Trade R
 ## What It Does
 
 - Parse Trade Republic PDF statements into normalized CSV files
-- Classify transactions with manual rules, deterministic heuristics, and local Ollama prompts
+- Classify transactions with cache-backed local Ollama prompts and manual overrides
 - Review and override categories, linked transactions, and investment subcategories in the UI
 - Analyze cashflow, recurring expenses, trend, and portfolio returns
 - Keep the full workflow local, without depending on a hosted backend
@@ -92,10 +92,16 @@ npm run desktop
 ### Classify transactions with a local model
 
 ```bash
-./scripts/categorize_transactions.py data/processed/statement_transactions.csv --model qwen3.5:9b
+./scripts/categorize_transactions.py data/processed/statement_transactions.csv --model qwen3.5:9b --statement-language de
 ```
 
 On a fresh clone, the app starts empty until you import your own statement data.
+
+## Import Behavior
+
+New statement imports are merged into the existing processed dataset. If statement date ranges overlap, matching transaction and money-market-fund rows from the new statement are skipped so the dashboard can be updated incrementally without double-counting the overlap. Existing row IDs are preserved for overlapping rows, so row overrides remain attached.
+
+The importer reuses the existing category cache during normal imports and reclassifications, so only uncached rows need a local LLM call. `refresh_reclassify` intentionally ignores the cache and classifies from scratch.
 
 ## Data and Config
 
@@ -108,18 +114,20 @@ On a fresh clone, the app starts empty until you import your own statement data.
 
 ## Classification Approach
 
-Transaction classification uses three layers:
+Transaction classification is local and cache-backed:
 
-1. manual rules from `config/manual_category_rules.csv`
-2. deterministic handling for obvious rows such as trades, taxes, interest, cashback, and self-transfers
-3. local LLM classification for rows that still need interpretation
+1. cached prior classifications and manual row overrides are reused when available
+2. curated examples, prior corrections, and `config/manual_category_rules.csv` entries are added to the language-specific prompt examples
+3. the selected local LLM classifies uncached rows, with failed classifications marked as `Local AI fallback`
+
+The Load data screen includes a statement language selector for German (`de`) and Italian (`it`). The selected language controls the curated examples injected into the category and investment-asset prompts. Changing the model, prompt, account-holder name, statement language, or prompt examples changes the cache fingerprint, so existing rows may be classified again under the new settings.
 
 Prompt templates live in:
 
 - `config/classifier_prompt_template.txt`
 - `config/investment_asset_class_prompt_template.txt`
 
-This keeps recurring runs fast while still allowing manual control over edge cases.
+Manual rules currently guide the prompt rather than forcing deterministic category assignments. This keeps recurring runs fast while still allowing manual control over edge cases.
 
 ## Useful Commands
 

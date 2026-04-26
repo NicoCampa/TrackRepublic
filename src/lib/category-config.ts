@@ -55,7 +55,7 @@ export const SOURCE_LABELS: Record<string, string> = {
   rule: "Built-in rule",
   llm: "Local AI model",
   llm_web: "Web-enriched AI",
-  fallback: "Fallback",
+  fallback: "Local AI fallback",
 };
 
 export const FIXED_COST_CATEGORIES = new Set([

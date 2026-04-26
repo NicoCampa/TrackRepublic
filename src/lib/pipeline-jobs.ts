@@ -46,10 +46,12 @@ export type PipelineJob = {
   startedAt: string;
   completedAt?: string;
   sourcePdf?: string;
+  statementLanguage?: string;
   archivePath?: string;
   sourcePdfSha256?: string;
   statementFingerprint?: string;
   duplicatesDropped?: number;
+  overlapDuplicatesDropped?: number;
   published?: boolean;
   message?: string;
   logs: string[];
@@ -64,12 +66,14 @@ type StartPipelineOptions = {
   promptAddendum?: string;
   userName?: string;
   model?: string;
+  statementLanguage?: string;
 };
 
 type ParseMetadata = {
   transactionRowCount: number;
   fundRowCount: number;
   duplicatesDropped: number;
+  overlapDuplicatesDropped?: number;
   statementFingerprint: string;
 };
 
@@ -91,18 +95,66 @@ const CONVERT_SCRIPT = resolveRuntimeScript("convert_trade_republic_statement.py
 const CATEGORIZE_SCRIPT = resolveRuntimeScript("categorize_transactions.py");
 const TRANSACTIONS_OUTPUT = "statement_transactions.csv";
 const FUND_OUTPUT = "statement_money_market_fund.csv";
+const ALL_ROWS_OUTPUT = "statement_all_rows.csv";
 const CATEGORIZED_OUTPUT = "statement_transactions_categorized.csv";
+const CATEGORY_CACHE_OUTPUT = "statement_transactions_category_cache.json";
 const PARSE_META_OUTPUT = "statement_parse_meta.json";
+const TRANSACTION_COLUMNS = [
+  "row_id",
+  "page",
+  "date",
+  "date_original",
+  "type",
+  "description",
+  "signed_amount_eur",
+  "payment_in_eur",
+  "payment_out_eur",
+  "balance_eur",
+  "raw_row",
+] as const;
+const FUND_COLUMNS = [
+  "row_id",
+  "page",
+  "date",
+  "date_original",
+  "payment_type",
+  "fund",
+  "isin",
+  "units",
+  "price_per_unit_eur",
+  "amount_eur",
+  "raw_row",
+] as const;
+const ALL_ROWS_COLUMNS = [
+  "row_id",
+  "section",
+  "page",
+  "date",
+  "date_original",
+  "type",
+  "description",
+  "signed_amount_eur",
+  "payment_in_eur",
+  "payment_out_eur",
+  "balance_eur",
+  "payment_type",
+  "fund",
+  "isin",
+  "units",
+  "price_per_unit_eur",
+  "amount_eur",
+  "raw_row",
+] as const;
 const PROCESSED_OUTPUTS = [
   TRANSACTIONS_OUTPUT,
   FUND_OUTPUT,
-  "statement_all_rows.csv",
+  ALL_ROWS_OUTPUT,
   CATEGORIZED_OUTPUT,
   "statement_transactions_monthly_overview.csv",
   "statement_transactions_yearly_overview.csv",
   "statement_transactions_monthly_categories.csv",
   "statement_transactions_yearly_categories.csv",
-  "statement_transactions_category_cache.json",
+  CATEGORY_CACHE_OUTPUT,
   "pipeline_summary.json",
 ];
 const PIPELINE_STAGE_WEIGHTS: Record<PipelineMode, Array<{ key: PipelineStageKey; label: string; weight: number }>> = {
@@ -126,6 +178,11 @@ const PIPELINE_STAGE_WEIGHTS: Record<PipelineMode, Array<{ key: PipelineStageKey
 };
 
 let ollamaModelsCache: { expiresAt: number; models: string[] } | null = null;
+
+function normalizeStatementLanguage(value: string | undefined) {
+  const normalized = (value ?? "").trim().toLowerCase();
+  return normalized === "it" ? "it" : "de";
+}
 
 async function readAvailableOllamaModels() {
   if (ollamaModelsCache && ollamaModelsCache.expiresAt > Date.now()) {
@@ -189,6 +246,47 @@ function buildCanonicalTransactionFingerprint(row: Record<string, string>) {
     normalizeFingerprintValue(row.balance_eur),
     normalizeFingerprintValue(row.raw_row),
   ]);
+}
+
+function normalizeDedupeValue(value: unknown) {
+  return normalizeFingerprintValue(value).toUpperCase();
+}
+
+function normalizeDedupeAmount(value: unknown) {
+  const normalized = normalizeFingerprintValue(value);
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed.toFixed(2) : normalized;
+}
+
+function buildTransactionOverlapKey(row: Record<string, string>) {
+  return JSON.stringify([
+    "transactions",
+    normalizeFingerprintValue(row.date),
+    normalizeDedupeValue(row.type),
+    normalizeDedupeValue(row.description),
+    normalizeDedupeAmount(row.signed_amount_eur),
+  ]);
+}
+
+function buildFundOverlapKey(row: Record<string, string>) {
+  return JSON.stringify([
+    "money_market_fund",
+    normalizeFingerprintValue(row.date),
+    normalizeDedupeValue(row.payment_type),
+    normalizeDedupeValue(row.fund),
+    normalizeDedupeValue(row.isin),
+    normalizeDedupeAmount(row.units),
+    normalizeDedupeAmount(row.price_per_unit_eur),
+    normalizeDedupeAmount(row.amount_eur),
+  ]);
+}
+
+function sortRowsByDate<Row extends Record<string, string>>(rows: Row[]) {
+  return [...rows].sort((left, right) => {
+    const leftKey = `${normalizeFingerprintValue(left.date)}-${normalizeFingerprintValue(left.row_id)}`;
+    const rightKey = `${normalizeFingerprintValue(right.date)}-${normalizeFingerprintValue(right.row_id)}`;
+    return leftKey.localeCompare(rightKey);
+  });
 }
 
 function isLegacyNumericRowId(value: string) {
@@ -271,6 +369,168 @@ async function readCsvRecords(filePath: string) {
   }) as Record<string, string>[];
 }
 
+async function readRequiredCsvRecords(filePath: string, label: string) {
+  try {
+    return await readCsvRecords(filePath);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to read ${label} CSV at ${filePath}: ${detail}`);
+  }
+}
+
+async function readOptionalCsvRecords(filePath: string, label: string) {
+  if (!existsSync(filePath)) {
+    return [];
+  }
+  return readRequiredCsvRecords(filePath, label);
+}
+
+function csvEscape(value: unknown) {
+  const text = String(value ?? "");
+  if (/[",\n\r]/.test(text)) {
+    return `"${text.replaceAll('"', '""')}"`;
+  }
+  return text;
+}
+
+async function writeCsvRecords(filePath: string, columns: readonly string[], rows: Record<string, string>[]) {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const body = [
+    columns.join(","),
+    ...rows.map((row) => columns.map((column) => csvEscape(row[column] ?? "")).join(",")),
+  ].join("\n");
+  await writeFile(filePath, `${body}\n`, "utf8");
+}
+
+function mergeRowsByOverlapKey(
+  existingRows: Record<string, string>[],
+  incomingRows: Record<string, string>[],
+  keyForRow: (row: Record<string, string>) => string,
+) {
+  const existingCounts = new Map<string, number>();
+  const existingRowIds = new Set<string>();
+  for (const row of existingRows) {
+    existingCounts.set(keyForRow(row), (existingCounts.get(keyForRow(row)) ?? 0) + 1);
+    const rowId = normalizeFingerprintValue(row.row_id);
+    if (rowId) {
+      existingRowIds.add(rowId);
+    }
+  }
+
+  const incomingSeen = new Map<string, number>();
+  const keptIncomingRows: Record<string, string>[] = [];
+  let duplicatesDropped = 0;
+  for (const row of incomingRows) {
+    const key = keyForRow(row);
+    const nextSeen = (incomingSeen.get(key) ?? 0) + 1;
+    incomingSeen.set(key, nextSeen);
+    const rowId = normalizeFingerprintValue(row.row_id);
+    if (nextSeen <= (existingCounts.get(key) ?? 0) || (rowId && existingRowIds.has(rowId))) {
+      duplicatesDropped += 1;
+      continue;
+    }
+    if (rowId) {
+      existingRowIds.add(rowId);
+    }
+    keptIncomingRows.push(row);
+  }
+
+  return {
+    rows: sortRowsByDate([...existingRows, ...keptIncomingRows]),
+    duplicatesDropped,
+  };
+}
+
+function transactionToAllRowsRecord(row: Record<string, string>) {
+  return {
+    row_id: row.row_id ?? "",
+    section: "transactions",
+    page: row.page ?? "",
+    date: row.date ?? "",
+    date_original: row.date_original ?? "",
+    type: row.type ?? "",
+    description: row.description ?? "",
+    signed_amount_eur: row.signed_amount_eur ?? "",
+    payment_in_eur: row.payment_in_eur ?? "",
+    payment_out_eur: row.payment_out_eur ?? "",
+    balance_eur: row.balance_eur ?? "",
+    payment_type: "",
+    fund: "",
+    isin: "",
+    units: "",
+    price_per_unit_eur: "",
+    amount_eur: "",
+    raw_row: row.raw_row ?? "",
+  };
+}
+
+function fundToAllRowsRecord(row: Record<string, string>) {
+  return {
+    row_id: row.row_id ?? "",
+    section: "money_market_fund",
+    page: row.page ?? "",
+    date: row.date ?? "",
+    date_original: row.date_original ?? "",
+    type: "",
+    description: "",
+    signed_amount_eur: "",
+    payment_in_eur: "",
+    payment_out_eur: "",
+    balance_eur: "",
+    payment_type: row.payment_type ?? "",
+    fund: row.fund ?? "",
+    isin: row.isin ?? "",
+    units: row.units ?? "",
+    price_per_unit_eur: row.price_per_unit_eur ?? "",
+    amount_eur: row.amount_eur ?? "",
+    raw_row: row.raw_row ?? "",
+  };
+}
+
+async function mergeParsedStatementWithExistingData(tempDir: string) {
+  const currentTransactionsPath = path.join(DATA_DIR, TRANSACTIONS_OUTPUT);
+  const currentFundPath = path.join(DATA_DIR, FUND_OUTPUT);
+  const nextTransactionsPath = path.join(tempDir, TRANSACTIONS_OUTPUT);
+  const nextFundPath = path.join(tempDir, FUND_OUTPUT);
+  const existingTransactions = await readOptionalCsvRecords(currentTransactionsPath, "existing transactions");
+  const existingFundRows = await readOptionalCsvRecords(currentFundPath, "existing money market fund");
+  const incomingTransactions = await readRequiredCsvRecords(nextTransactionsPath, "incoming transactions");
+  const incomingFundRows = await readRequiredCsvRecords(nextFundPath, "incoming money market fund");
+
+  if (existingTransactions.length === 0 && existingFundRows.length === 0) {
+    return {
+      transactionRowCount: incomingTransactions.length,
+      fundRowCount: incomingFundRows.length,
+      overlapDuplicatesDropped: 0,
+    };
+  }
+
+  const mergedTransactions = mergeRowsByOverlapKey(
+    existingTransactions,
+    incomingTransactions,
+    buildTransactionOverlapKey,
+  );
+  const mergedFundRows = mergeRowsByOverlapKey(
+    existingFundRows,
+    incomingFundRows,
+    buildFundOverlapKey,
+  );
+  const mergedAllRows = sortRowsByDate([
+    ...mergedTransactions.rows.map(transactionToAllRowsRecord),
+    ...mergedFundRows.rows.map(fundToAllRowsRecord),
+  ]);
+
+  await writeCsvRecords(nextTransactionsPath, TRANSACTION_COLUMNS, mergedTransactions.rows);
+  await writeCsvRecords(nextFundPath, FUND_COLUMNS, mergedFundRows.rows);
+  await writeCsvRecords(path.join(tempDir, ALL_ROWS_OUTPUT), ALL_ROWS_COLUMNS, mergedAllRows);
+
+  return {
+    transactionRowCount: mergedTransactions.rows.length,
+    fundRowCount: mergedFundRows.rows.length,
+    overlapDuplicatesDropped: mergedTransactions.duplicatesDropped + mergedFundRows.duplicatesDropped,
+  };
+}
+
 async function loadParseMetadata(tempDir: string): Promise<ParseMetadata> {
   const parseMetaPath = path.join(tempDir, PARSE_META_OUTPUT);
   try {
@@ -288,8 +548,8 @@ async function loadParseMetadata(tempDir: string): Promise<ParseMetadata> {
     };
   } catch {
     const [transactionRows, fundRows] = await Promise.all([
-      readCsvRecords(path.join(tempDir, TRANSACTIONS_OUTPUT)).catch(() => []),
-      readCsvRecords(path.join(tempDir, FUND_OUTPUT)).catch(() => []),
+      readRequiredCsvRecords(path.join(tempDir, TRANSACTIONS_OUTPUT), "parsed transactions"),
+      readRequiredCsvRecords(path.join(tempDir, FUND_OUTPUT), "parsed money market fund"),
     ]);
     const statementFingerprint = hashTextSha256(
       [...transactionRows.map((row) => String(row.row_id ?? "")), ...fundRows.map((row) => String(row.row_id ?? ""))]
@@ -607,6 +867,7 @@ async function buildFallbackSummary(
     sourceArchivePath: job.archivePath,
     sourcePdfSha256: job.sourcePdfSha256,
     statementFingerprint: job.statementFingerprint ?? parseMetadata?.statementFingerprint,
+    statementLanguage: job.statementLanguage,
     mode: job.mode,
     startedAt: job.startedAt,
     completedAt: job.completedAt,
@@ -616,6 +877,7 @@ async function buildFallbackSummary(
     transactionRowCount: parseMetadata?.transactionRowCount ?? await countCsvRows(path.join(tempDir, TRANSACTIONS_OUTPUT)),
     fundRowCount: parseMetadata?.fundRowCount ?? await countCsvRows(path.join(tempDir, FUND_OUTPUT)),
     duplicatesDropped: job.duplicatesDropped ?? parseMetadata?.duplicatesDropped ?? 0,
+    overlapDuplicatesDropped: job.overlapDuplicatesDropped ?? parseMetadata?.overlapDuplicatesDropped ?? 0,
     outputs: [...job.outputs],
     logs: job.logs.slice(-60),
   };
@@ -633,6 +895,7 @@ function buildSkippedSummary(
     sourceArchivePath: job.archivePath,
     sourcePdfSha256: job.sourcePdfSha256,
     statementFingerprint: job.statementFingerprint ?? parseMetadata?.statementFingerprint,
+    statementLanguage: job.statementLanguage,
     mode: job.mode,
     startedAt: job.startedAt,
     completedAt: job.completedAt,
@@ -642,6 +905,7 @@ function buildSkippedSummary(
     transactionRowCount: parseMetadata?.transactionRowCount,
     fundRowCount: parseMetadata?.fundRowCount,
     duplicatesDropped: parseMetadata?.duplicatesDropped ?? 0,
+    overlapDuplicatesDropped: parseMetadata?.overlapDuplicatesDropped ?? 0,
     outputs: [],
     logs: job.logs.slice(-60),
   };
@@ -664,6 +928,7 @@ async function finalizeOutputs(job: PipelineJob, tempDir: string, sourceTransact
   summary.sourcePdf = job.sourcePdf ?? summary.sourcePdf;
   summary.sourcePdfSha256 = job.sourcePdfSha256 ?? summary.sourcePdfSha256;
   summary.statementFingerprint = job.statementFingerprint ?? parseMetadata?.statementFingerprint ?? summary.statementFingerprint;
+  summary.statementLanguage = job.statementLanguage ?? summary.statementLanguage;
   summary.mode = job.mode;
   summary.startedAt = job.startedAt;
   summary.completedAt = job.completedAt;
@@ -671,6 +936,7 @@ async function finalizeOutputs(job: PipelineJob, tempDir: string, sourceTransact
   summary.published = job.published ?? summary.published ?? true;
   summary.message = job.message ?? job.error;
   summary.duplicatesDropped = job.duplicatesDropped ?? parseMetadata?.duplicatesDropped ?? summary.duplicatesDropped ?? 0;
+  summary.overlapDuplicatesDropped = job.overlapDuplicatesDropped ?? parseMetadata?.overlapDuplicatesDropped ?? summary.overlapDuplicatesDropped ?? 0;
   await savePipelineSummary(summary);
   job.summary = summary;
 }
@@ -688,6 +954,8 @@ async function executePipeline(job: PipelineJob, file?: File, fileBuffer?: Buffe
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "cashflow-pipeline-"));
   let sourceTransactionsCsv = path.join(DATA_DIR, "statement_transactions.csv");
   let parseMetadata: ParseMetadata | undefined;
+  const statementLanguage = normalizeStatementLanguage(options?.statementLanguage ?? job.statementLanguage);
+  job.statementLanguage = statementLanguage;
   try {
     if (job.mode === "parse_classify") {
       if (!file) {
@@ -723,6 +991,27 @@ async function executePipeline(job: PipelineJob, file?: File, fileBuffer?: Buffe
         await appendImportRegistryEntry(job);
         return;
       }
+
+      job.step = "Merging statement";
+      const mergeMetadata = await mergeParsedStatementWithExistingData(tempDir);
+      parseMetadata = {
+        ...parseMetadata,
+        transactionRowCount: mergeMetadata.transactionRowCount,
+        fundRowCount: mergeMetadata.fundRowCount,
+        duplicatesDropped: parseMetadata.duplicatesDropped + mergeMetadata.overlapDuplicatesDropped,
+        overlapDuplicatesDropped: mergeMetadata.overlapDuplicatesDropped,
+      };
+      job.duplicatesDropped = parseMetadata.duplicatesDropped;
+      job.overlapDuplicatesDropped = mergeMetadata.overlapDuplicatesDropped;
+      sourceTransactionsCsv = path.join(tempDir, TRANSACTIONS_OUTPUT);
+      appendLog(
+        job,
+        (
+          `Merged statement into existing dataset: ${mergeMetadata.transactionRowCount} transactions, `
+          + `${mergeMetadata.fundRowCount} fund rows, `
+          + `${mergeMetadata.overlapDuplicatesDropped} overlapping rows skipped.`
+        ),
+      );
     } else {
       job.step = "Preparing reclassification";
       setJobStage(job, "classifying", 0.02);
@@ -730,6 +1019,9 @@ async function executePipeline(job: PipelineJob, file?: File, fileBuffer?: Buffe
 
     job.step = "Classifying transactions";
     setJobStage(job, "classifying");
+    if (job.mode !== "refresh_reclassify" && existsSync(CATEGORY_CACHE_PATH)) {
+      await copyFile(CATEGORY_CACHE_PATH, path.join(tempDir, CATEGORY_CACHE_OUTPUT)).catch(() => undefined);
+    }
     const classifyArgs = [
       CATEGORIZE_SCRIPT,
       sourceTransactionsCsv,
@@ -741,6 +1033,8 @@ async function executePipeline(job: PipelineJob, file?: File, fileBuffer?: Buffe
       path.join(ROOT, "config", "transaction_overrides.csv"),
       "--summary-json",
       path.join(tempDir, "pipeline_summary.json"),
+      "--statement-language",
+      statementLanguage,
     ];
     const promptTemplate = options?.promptTemplate?.trim();
     if (promptTemplate) {
@@ -788,6 +1082,7 @@ async function executePipeline(job: PipelineJob, file?: File, fileBuffer?: Buffe
       job.summary.sourcePdfSha256 = job.sourcePdfSha256 ?? job.summary.sourcePdfSha256;
       job.summary.statementFingerprint = job.statementFingerprint ?? job.summary.statementFingerprint;
       job.summary.duplicatesDropped = job.duplicatesDropped ?? job.summary.duplicatesDropped;
+      job.summary.overlapDuplicatesDropped = job.overlapDuplicatesDropped ?? job.summary.overlapDuplicatesDropped;
       await savePipelineSummary(job.summary);
     }
     await appendImportRegistryEntry(job);
@@ -806,7 +1101,9 @@ async function executePipeline(job: PipelineJob, file?: File, fileBuffer?: Buffe
     existingSummary.completedAt = job.completedAt;
     existingSummary.sourcePdfSha256 = job.sourcePdfSha256 ?? existingSummary.sourcePdfSha256;
     existingSummary.statementFingerprint = job.statementFingerprint ?? existingSummary.statementFingerprint;
+    existingSummary.statementLanguage = job.statementLanguage ?? existingSummary.statementLanguage;
     existingSummary.duplicatesDropped = job.duplicatesDropped ?? existingSummary.duplicatesDropped;
+    existingSummary.overlapDuplicatesDropped = job.overlapDuplicatesDropped ?? existingSummary.overlapDuplicatesDropped;
     existingSummary.logs = job.logs.slice(-60);
     await savePipelineSummary(existingSummary);
     job.summary = existingSummary;
@@ -818,6 +1115,7 @@ async function executePipeline(job: PipelineJob, file?: File, fileBuffer?: Buffe
 export async function startPipelineJob(mode: PipelineMode, file?: File, options?: StartPipelineOptions) {
   let fileBuffer: Buffer | undefined;
   let sourcePdfSha256 = "";
+  const statementLanguage = normalizeStatementLanguage(options?.statementLanguage);
   if (mode === "parse_classify") {
     if (!file) {
       throw new Error("A PDF file is required for Parse + classify.");
@@ -838,6 +1136,7 @@ export async function startPipelineJob(mode: PipelineMode, file?: File, options?
         startedAt: completedAt,
         completedAt,
         sourcePdf: file.name,
+        statementLanguage,
         sourcePdfSha256,
         statementFingerprint: existingEntry.statementFingerprint,
         duplicatesDropped: 0,
@@ -868,6 +1167,7 @@ export async function startPipelineJob(mode: PipelineMode, file?: File, options?
         sourceArchivePath: existingEntry.archivePath ?? currentSummary?.sourceArchivePath,
         sourcePdfSha256,
         statementFingerprint: existingEntry.statementFingerprint,
+        statementLanguage,
         mode,
         startedAt: job.startedAt,
         completedAt,
@@ -891,6 +1191,7 @@ export async function startPipelineJob(mode: PipelineMode, file?: File, options?
     step: "Queued",
     startedAt: new Date().toISOString(),
     sourcePdf: file?.name,
+    statementLanguage,
     sourcePdfSha256: sourcePdfSha256 || undefined,
     logs: [],
     outputs: [],

@@ -156,15 +156,18 @@ export type PipelineSummary = {
   published?: boolean;
   message?: string;
   model?: string;
+  statementLanguage?: string;
   transactionRowCount?: number;
   fundRowCount?: number;
   duplicatesDropped?: number;
+  overlapDuplicatesDropped?: number;
   cacheEntryCount?: number;
   cacheHits?: number;
   cacheMisses?: number;
   manualRuleHits?: number;
   builtInRuleHits?: number;
   llmClassifications?: number;
+  fallbackClassifications?: number;
   webEnrichedClassifications?: number;
   webLookupQueries?: number;
   rowOverrideHits?: number;
@@ -229,18 +232,30 @@ export function normalizePipelineSummary(payload: unknown): PipelineSummary | nu
         ? String(value.message ?? value.error ?? "")
         : undefined,
     model: value.model !== undefined ? String(value.model) : undefined,
+    statementLanguage:
+      value.statementLanguage !== undefined || value.statement_language !== undefined
+        ? String(value.statementLanguage ?? value.statement_language ?? "")
+        : undefined,
     transactionRowCount: parseNumber(
       String(value.transactionRowCount ?? value.transaction_row_count ?? ""),
       0,
     ),
     fundRowCount: parseNumber(String(value.fundRowCount ?? value.fund_row_count ?? ""), 0),
     duplicatesDropped: parseNumber(String(value.duplicatesDropped ?? value.duplicates_dropped ?? ""), 0),
+    overlapDuplicatesDropped: parseNumber(
+      String(value.overlapDuplicatesDropped ?? value.overlap_duplicates_dropped ?? ""),
+      0,
+    ),
     cacheEntryCount: parseNumber(String(value.cacheEntryCount ?? value.cache_entry_count ?? ""), 0),
     cacheHits: parseNumber(String(value.cacheHits ?? value.cache_hits ?? ""), 0),
     cacheMisses: parseNumber(String(value.cacheMisses ?? value.cache_misses ?? ""), 0),
     manualRuleHits: parseNumber(String(value.manualRuleHits ?? value.manual_rule_hits ?? ""), 0),
     builtInRuleHits: parseNumber(String(value.builtInRuleHits ?? value.built_in_rule_hits ?? ""), 0),
     llmClassifications: parseNumber(String(value.llmClassifications ?? value.llm_classifications ?? ""), 0),
+    fallbackClassifications: parseNumber(
+      String(value.fallbackClassifications ?? value.fallback_classifications ?? ""),
+      0,
+    ),
     webEnrichedClassifications: parseNumber(
       String(value.webEnrichedClassifications ?? value.web_enriched_classifications ?? ""),
       0,
